@@ -15,7 +15,7 @@ goto() {
     if [ -f "$tempfile" ]; then
         local target=$(cat "$tempfile")
         rm -f "$tempfile"
-        cd "$target" && pwd
+        cd "$target"
     fi
 }
 
