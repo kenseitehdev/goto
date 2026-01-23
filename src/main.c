@@ -679,7 +679,7 @@ static int tmux_split_left_detached(const char *cwd, const char *filetree_cmd) {
 
     char cmd[8192];
     snprintf(cmd, sizeof(cmd),
-             "tmux split-window -d -h -b -p 30 -c %s sh -lc %s",
+             "tmux split-window -d -h -b -p 25 -c %s sh -lc %s",
              qcwd, qscript);
 
     return system(cmd);
