@@ -11,7 +11,7 @@ add goto function to bashrc or zshrc or fishrc
 goto() {
     local tempfile="/tmp/.goto_path"
     rm -f "$tempfile"
-    /Users/{YOURUSER}/Documents/Projects/goto/bin/goto
+goto_dir/goto_executable_path
     if [ -f "$tempfile" ]; then
         local target=$(cat "$tempfile")
         rm -f "$tempfile"
