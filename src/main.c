@@ -388,12 +388,19 @@ int load_directory(FileList *list, const char *path) {
         list->cwd[MAX_PATH - 1] = '\0';
     }
 
+    // ✅ Keep the process working directory in sync with the UI's cwd
+    // This ensures system()/popen() (and your editor) start in the directory you're viewing.
+    if (chdir(list->cwd) != 0) {
+        closedir(dir);
+        return -1;
+    }
+
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL && list->count < MAX_ITEMS) {
         int is_hidden = (entry->d_name[0] == '.');
         if (is_hidden && !list->show_hidden) continue;
 
-        FileItem tmp = {0};
+        FileItem tmp = (FileItem){0};
         strncpy(tmp.name, entry->d_name, 255);
         tmp.name[255] = '\0';
 
@@ -714,11 +721,23 @@ void handle_input(FileList *list, int *running) {
             break;
                 case 'e':
         case 'E':
+            FILE *ftout = fopen("/tmp/.goto_path", "w");
+            if (ftout) {
+                fprintf(ftout, "%s", list->cwd);
+                fclose(ftout);
+            }
+
             // Open highlighted file in $EDITOR (fallback: vi)
             open_selected_with(list, "EDITOR", "vi");
             break;
         case 'v':
         case 'V':
+            FILE *fbout = fopen("/tmp/.goto_path", "w");
+            if (fbout) {
+                fprintf(fbout, "%s", list->cwd);
+                fclose(fbout);
+            }
+
             open_selected_with(list,"vi","vi");
             break;
         case 'p':
