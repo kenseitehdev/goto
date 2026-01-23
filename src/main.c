@@ -503,7 +503,7 @@ void draw_help_line(void) {
     mvhline(max_y - 1, 0, ' ', max_x);
     mvprintw(max_y - 1, 1,
              "j/k:move l:open bs:up h:hidden n:new N:mkdir r:rename d:del /:fzf "
-             "s?:sort(sn/ss/st/se/sr) f?:filter(ff/fd/fF/fc) o:cd q:quit");
+             "e:edit p:page s?:sort(sn/ss/st/se/sr) f?:filter(ff/fd/fF/fc) o:cd q:quit");
     attroff(COLOR_PAIR(4));
 }
 
@@ -624,6 +624,68 @@ static void apply_filter_command(FileList *list, int cmd) {
 
 /* ---------- Input ---------- */
 
+
+static void shell_quote_single(char *out, size_t out_len, const char *in) {
+    // Produces a single-quoted shell string, escaping embedded single quotes safely.
+    // Example: abc'def -> 'abc'"'"'def'
+    size_t j = 0;
+    if (out_len == 0) return;
+
+    out[j++] = '\'';
+    for (size_t i = 0; in[i] != '\0' && j + 6 < out_len; i++) {
+        if (in[i] == '\'') {
+            // close ', add " ' ", reopen '
+            const char *esc = "'\"'\"'";
+            for (int k = 0; esc[k] && j + 1 < out_len; k++) out[j++] = esc[k];
+        } else {
+            out[j++] = in[i];
+        }
+    }
+    if (j + 1 < out_len) out[j++] = '\'';
+    out[j] = '\0';
+}
+
+static int run_viewer_command(const char *cmd) {
+    // Leave curses, run command, then resume curses.
+    endwin();
+    int rc = system(cmd);
+    refresh();
+    clear();
+    return rc;
+}
+
+static int open_selected_with(FileList *list, const char *envvar, const char *fallback_cmd) {
+    if (list->selected >= list->count) return -1;
+
+    FileItem *item = &list->items[list->selected];
+
+    if (item->is_dir) {
+        popup_message("Nope", "That is a directory. Use 'l' to enter it.");
+        return 0;
+    }
+    if (strcmp(item->name, ".") == 0 || strcmp(item->name, "..") == 0) {
+        popup_message("Nope", "Refusing to open '.' or '..'.");
+        return 0;
+    }
+
+    const char *tool = getenv(envvar);
+    if (!tool || !*tool) tool = fallback_cmd;
+
+    char qpath[MAX_PATH * 2];
+    shell_quote_single(qpath, sizeof(qpath), item->full_path);
+
+    char cmd[8192];
+    // Allow envvar to contain args (e.g., "nvim -p", "bat -p", "less -R").
+    snprintf(cmd, sizeof(cmd), "%s %s", tool, qpath);
+
+    int rc = run_viewer_command(cmd);
+    if (rc != 0) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "Command failed (%d). Tried: %s", rc, cmd);
+        popup_message("Error", msg);
+    }
+    return 0;
+}
 void handle_input(FileList *list, int *running) {
     int ch = getch();
     int max_y, max_x;
@@ -649,6 +711,17 @@ void handle_input(FileList *list, int *running) {
         case 'q':
         case 'Q':
             *running = 0;
+            break;
+                case 'e':
+        case 'E':
+            // Open highlighted file in $EDITOR (fallback: vi)
+            open_selected_with(list, "EDITOR", "vi");
+            break;
+
+        case 'p':
+        case 'P':
+            // Open highlighted file in $PAGER (fallback: less -R)
+            open_selected_with(list, "PAGER", "less -R");
             break;
 
         case 'h':
