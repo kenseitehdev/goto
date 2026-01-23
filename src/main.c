@@ -503,7 +503,7 @@ void draw_help_line(void) {
     mvhline(max_y - 1, 0, ' ', max_x);
     mvprintw(max_y - 1, 1,
              "j/k:move l:open bs:up h:hidden n:new N:mkdir r:rename d:del /:fzf "
-             "e:edit p:page s?:sort(sn/ss/st/se/sr) f?:filter(ff/fd/fF/fc) o:cd q:quit");
+             "e:edit v: vi p:page s?:sort(sn/ss/st/se/sr) f?:filter(ff/fd/fF/fc) o:cd q:quit");
     attroff(COLOR_PAIR(4));
 }
 
@@ -717,7 +717,10 @@ void handle_input(FileList *list, int *running) {
             // Open highlighted file in $EDITOR (fallback: vi)
             open_selected_with(list, "EDITOR", "vi");
             break;
-
+        case 'v':
+        case 'V':
+            open_selected_with(list,"vi","vi");
+            break;
         case 'p':
         case 'P':
             // Open highlighted file in $PAGER (fallback: less -R)
