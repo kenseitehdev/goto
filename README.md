@@ -3,6 +3,9 @@ clone repo and make && make install
 
 DEPS:
 requires ncurses
+requires watch 
+requires tmux
+requires tree
 
 
 
