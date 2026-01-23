@@ -836,7 +836,7 @@ void handle_input(FileList *list, int *running) {
             if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
 
             // Replace with your custom command if you have one, e.g. "filetree"
-            const char *filetree_cmd = "watch -c 'tree -C'";
+            const char *filetree_cmd = "watch -c 'lsx -R'";
 
             open_selected_with_tmux_tree(list, filetree_cmd, "vi", "vi");
             break;
