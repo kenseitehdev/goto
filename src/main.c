@@ -13,7 +13,6 @@
 #define MAX_PATH 4096
 #define MAX_ITEMS 1024
 
-// NerdFont Icons (UTF-8)
 #define ICON_FOLDER "\ue5ff"
 #define ICON_FOLDER_OPEN "\uf07c"
 #define ICON_FILE "\uf15b"
@@ -63,18 +62,15 @@ typedef struct {
     char cwd[MAX_PATH];
     int show_hidden;
 
-    // sort + filter state
     SortMode sort_mode;
     int sort_reverse;
 
     FilterMode filter_mode;
-    char filter_text[256]; // used for FILTER_CONTAINS
+    char filter_text[256]; 
 
-    // prefix input state for 2-key commands
-    char pending_prefix;   // 0, 's', or 'f'
+    char pending_prefix;   
+
 } FileList;
-
-/* ---------- Popup helpers ---------- */
 
 static void popup_message(const char *title, const char *message) {
     int max_y, max_x;
@@ -172,7 +168,6 @@ static int popup_prompt(char *out, size_t out_len, const char *title, const char
     touchwin(stdscr);
     refresh();
 
-    // trim whitespace
     size_t len = strlen(buf);
     while (len > 0 && isspace((unsigned char)buf[len - 1])) buf[--len] = '\0';
     size_t start = 0;
@@ -187,8 +182,6 @@ static int popup_prompt(char *out, size_t out_len, const char *title, const char
     out[out_len - 1] = '\0';
     return 1;
 }
-
-/* ---------- File ops ---------- */
 
 static int create_new_file(const char *cwd, const char *name) {
     char path[MAX_PATH];
@@ -214,7 +207,8 @@ static int create_new_dir(const char *cwd, const char *name) {
 }
 
 static int delete_item_shallow(const FileItem *item) {
-    if (item->is_dir) return rmdir(item->full_path);  // fails if not empty
+    if (item->is_dir) return rmdir(item->full_path);  
+
     return unlink(item->full_path);
 }
 
@@ -235,8 +229,6 @@ static int rename_item(const FileItem *item, const char *new_name) {
 
     return rename(item->full_path, new_path);
 }
-
-/* ---------- Icons / Colors ---------- */
 
 const char* get_file_icon(FileItem *item) {
     if (item->is_dir) {
@@ -267,8 +259,9 @@ const char* get_file_icon(FileItem *item) {
 }
 
 int get_file_color(FileItem *item) {
-    if (item->is_dir) return 1; // Cyan
-    if (item->mode & S_IXUSR) return 2; // Green
+    if (item->is_dir) return 1; 
+
+    if (item->mode & S_IXUSR) return 2; 
 
     const char *ext = strrchr(item->name, '.');
     if (!ext) return 4;
@@ -282,12 +275,11 @@ int get_file_color(FileItem *item) {
     return 4;
 }
 
-/* ---------- Sorting helpers ---------- */
-
 static const char* file_ext(const char *name) {
     const char *ext = strrchr(name, '.');
     if (!ext || ext == name) return "";
-    return ext + 1; // without dot
+    return ext + 1; 
+
 }
 
 static int compare_items(const void *a, const void *b, void *ctx) {
@@ -295,7 +287,6 @@ static int compare_items(const void *a, const void *b, void *ctx) {
     const FileItem *A = (const FileItem*)a;
     const FileItem *B = (const FileItem*)b;
 
-    // Dirs first
     if (A->is_dir != B->is_dir) {
         int r = (B->is_dir - A->is_dir);
         return list->sort_reverse ? -r : r;
@@ -331,7 +322,6 @@ static int compare_items(const void *a, const void *b, void *ctx) {
     return list->sort_reverse ? -r : r;
 }
 
-// Portable qsort with static context
 static FileList *g_sort_ctx = NULL;
 static int compare_items_static(const void *a, const void *b) {
     return compare_items(a, b, g_sort_ctx);
@@ -341,8 +331,6 @@ static void sort_items_portable(FileList *list) {
     qsort(list->items, list->count, sizeof(FileItem), compare_items_static);
     g_sort_ctx = NULL;
 }
-
-/* ---------- Filtering ---------- */
 
 static int passes_filter(const FileList *list, const FileItem *item) {
     switch (list->filter_mode) {
@@ -359,8 +347,6 @@ static int passes_filter(const FileList *list, const FileItem *item) {
             return 1;
     }
 }
-
-/* ---------- Directory loading ---------- */
 
 int load_directory(FileList *list, const char *path) {
     DIR *dir = opendir(path);
@@ -379,7 +365,6 @@ int load_directory(FileList *list, const char *path) {
         list->cwd[MAX_PATH - 1] = '\0';
     }
 
-    // Keep process cwd in sync with UI cwd
     if (chdir(list->cwd) != 0) {
         closedir(dir);
         return -1;
@@ -429,8 +414,6 @@ void format_size(off_t size, char *buf, size_t len) {
     else if (size < 1024 * 1024 * 1024) snprintf(buf, len, "%.1fM", size / (1024.0 * 1024.0));
     else snprintf(buf, len, "%.1fG", size / (1024.0 * 1024.0 * 1024.0));
 }
-
-/* ---------- UI ---------- */
 
 static const char* sort_label(SortMode m) {
     switch (m) {
@@ -538,8 +521,6 @@ void draw_ui(FileList *list) {
     refresh();
 }
 
-/* ---------- fzf ---------- */
-
 static int fzf_select_path(FileList *list, char *out, size_t out_len) {
     char cmd[8192];
     snprintf(cmd, sizeof(cmd),
@@ -567,15 +548,18 @@ static int fzf_select_path(FileList *list, char *out, size_t out_len) {
     return 1;
 }
 
-/* ---------- Command handling for s? and f? ---------- */
-
 static void apply_sort_command(FileList *list, int cmd) {
     switch (cmd) {
-        case 'n': list->sort_mode = SORT_NAME; break;   // sn
-        case 's': list->sort_mode = SORT_SIZE; break;   // ss
-        case 't': list->sort_mode = SORT_TIME; break;   // st
-        case 'e': list->sort_mode = SORT_EXT;  break;   // se
-        case 'r': list->sort_reverse = !list->sort_reverse; break; // sr
+        case 'n': list->sort_mode = SORT_NAME; break;   
+
+        case 's': list->sort_mode = SORT_SIZE; break;   
+
+        case 't': list->sort_mode = SORT_TIME; break;   
+
+        case 'e': list->sort_mode = SORT_EXT;  break;   
+
+        case 'r': list->sort_reverse = !list->sort_reverse; break; 
+
         default: break;
     }
     load_directory(list, list->cwd);
@@ -583,22 +567,26 @@ static void apply_sort_command(FileList *list, int cmd) {
 
 static void apply_filter_command(FileList *list, int cmd) {
     switch (cmd) {
-        case 'f': // ff => files only
+        case 'f': 
+
             list->filter_mode = FILTER_FILES;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
-        case 'd': // fd => dirs only
+        case 'd': 
+
             list->filter_mode = FILTER_DIRS;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
-        case 'F': // fF => clear filter
+        case 'F': 
+
             list->filter_mode = FILTER_ALL;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
-        case 'c': { // fc => contains substring
+        case 'c': { 
+
             char s[256];
             if (popup_prompt(s, sizeof(s), "Filter (contains)", "Substring to match (empty clears):")) {
                 list->filter_mode = FILTER_CONTAINS;
@@ -616,11 +604,8 @@ static void apply_filter_command(FileList *list, int cmd) {
     }
 }
 
-/* ---------- Shell helpers ---------- */
-
 static void shell_quote_single(char *out, size_t out_len, const char *in) {
-    // Produces a single-quoted shell string, escaping embedded single quotes safely.
-    // Example: abc'def -> 'abc'"'"'def'
+
     size_t j = 0;
     if (out_len == 0) return;
 
@@ -644,8 +629,6 @@ static int run_viewer_command(const char *cmd) {
     clear();
     return rc;
 }
-
-/* ---------- NEW: tmux anchored cleanup (Ctrl+C left pane) ---------- */
 
 static int in_tmux(void) {
     const char *t = getenv("TMUX");
@@ -739,7 +722,6 @@ static int open_selected_with_tmux_tree(FileList *list,
 
     endwin();
 
-    // Anchor on the pane running goto/editor
     if (tmux_get_current_pane_id(editor_pane_id, sizeof(editor_pane_id)) != 0) {
         char cmd[8192];
         snprintf(cmd, sizeof(cmd), "%s %s", editor, qpath);
@@ -749,23 +731,18 @@ static int open_selected_with_tmux_tree(FileList *list,
         return rc;
     }
 
-    // Create left pane without switching focus
     tmux_split_left_detached(list->cwd, filetree_cmd);
 
-    // Run editor in this pane (blocks)
     char editcmd[8192];
     snprintf(editcmd, sizeof(editcmd), "%s %s", editor, qpath);
     int rc = system(editcmd);
 
-    // After editor exit, switch to left pane (relative to editor pane), send Ctrl+C, and remove it
     tmux_stop_left_of_pane(editor_pane_id, 1);
 
     refresh();
     clear();
     return rc;
 }
-
-/* ---------- Existing open helper ---------- */
 
 static int open_selected_with(FileList *list, const char *envvar, const char *fallback_cmd) {
     if (list->selected >= list->count) return -1;
@@ -799,15 +776,12 @@ static int open_selected_with(FileList *list, const char *envvar, const char *fa
     return 0;
 }
 
-/* ---------- Input ---------- */
-
 void handle_input(FileList *list, int *running) {
     int ch = getch();
     int max_y, max_x;
     getmaxyx(stdscr, max_y, max_x);
     int visible_lines = max_y - 3;
 
-    // If waiting for 2nd key for s? or f?
     if (list->pending_prefix) {
         char prefix = list->pending_prefix;
         list->pending_prefix = 0;
@@ -835,7 +809,6 @@ void handle_input(FileList *list, int *running) {
             FILE *fbout = fopen("/tmp/.goto_path", "w");
             if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
 
-            // Replace with your custom command if you have one, e.g. "filetree"
             const char *filetree_cmd = "watch -c 'lsx -R'";
 
             open_selected_with_tmux_tree(list, filetree_cmd, "vi", "vi");
@@ -1041,8 +1014,6 @@ void handle_input(FileList *list, int *running) {
     }
 }
 
-/* ---------- Main ---------- */
-
 int main(void) {
     setlocale(LC_ALL, "");
     FileList list = {0};
@@ -1050,7 +1021,6 @@ int main(void) {
 
     list.show_hidden = 0;
 
-    // defaults
     list.sort_mode = SORT_NAME;
     list.sort_reverse = 0;
     list.filter_mode = FILTER_ALL;
@@ -1096,3 +1066,4 @@ int main(void) {
     endwin();
     return 0;
 }
+
