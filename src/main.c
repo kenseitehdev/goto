@@ -331,7 +331,61 @@ static void sort_items_portable(FileList *list) {
     qsort(list->items, list->count, sizeof(FileItem), compare_items_static);
     g_sort_ctx = NULL;
 }
+static int fzf_grep_search(FileList *list, char *out_file, size_t out_len, int *out_line) {
+    char cmd[8192];
+    // Try ripgrep first, fall back to grep
+    snprintf(cmd, sizeof(cmd),
+             "cd '%s' && "
+             "if command -v rg >/dev/null 2>&1; then "
+             "  rg --line-number --with-filename --no-heading --color=always '' 2>/dev/null | "
+             "  fzf --ansi --prompt='Grep> ' --height=40%% --reverse --delimiter=: "
+             "      --preview 'bat --color=always {1} --highlight-line {2} 2>/dev/null || cat {1}' "
+             "      --preview-window='+{2}/2'; "
+             "else "
+             "  grep -rn --color=always '' . 2>/dev/null | "
+             "  fzf --ansi --prompt='Grep> ' --height=40%% --reverse --delimiter=: "
+             "      --preview 'cat {1}'; "
+             "fi",
+             list->cwd);
 
+    FILE *p = popen(cmd, "r");
+    if (!p) return -1;
+
+    char buf[MAX_PATH * 2] = {0};
+    if (!fgets(buf, sizeof(buf), p)) {
+        pclose(p);
+        return 0;
+    }
+    pclose(p);
+
+    buf[strcspn(buf, "\r\n")] = '\0';
+    if (buf[0] == '\0') return 0;
+
+    // Parse the output: filename:line:content
+    char *colon1 = strchr(buf, ':');
+    if (!colon1) return 0;
+    
+    *colon1 = '\0';
+    char *filename = buf;
+    
+    char *colon2 = strchr(colon1 + 1, ':');
+    if (!colon2) {
+        *colon1 = ':';
+        return 0;
+    }
+    
+    *colon2 = '\0';
+    char *linestr = colon1 + 1;
+    
+    // Extract line number
+    *out_line = atoi(linestr);
+    
+    // Copy filename
+    strncpy(out_file, filename, out_len - 1);
+    out_file[out_len - 1] = '\0';
+    
+    return 1;
+}
 static int passes_filter(const FileList *list, const FileItem *item) {
     switch (list->filter_mode) {
         case FILTER_ALL:
@@ -795,7 +849,55 @@ void handle_input(FileList *list, int *running) {
         case 'Q':
             *running = 0;
             break;
+case '?': {
+            // Check if 'g' was already pressed (for 'gg' to go to top)
+            static int g_pressed = 0;
+            static time_t g_time = 0;
+            time_t now = time(NULL);
+            
+            if (g_pressed && (now - g_time) < 1) {
+                // Second 'g' within 1 second - go to top
+                g_pressed = 0;
+                list->selected = 0;
+                list->scroll_offset = 0;
+                break;
+            }
+            
+            g_pressed = 1;
+            g_time = now;
+            
+            // Perform grep search
+            char rel_file[MAX_PATH];
+            int line_num = 0;
 
+            endwin();
+            int ok = fzf_grep_search(list, rel_file, sizeof(rel_file), &line_num);
+            refresh();
+            clear();
+
+            if (ok > 0) {
+                char full[MAX_PATH];
+                snprintf(full, sizeof(full), "%s/%s", list->cwd, rel_file);
+
+                struct stat st;
+                if (lstat(full, &st) == 0 && !S_ISDIR(st.st_mode)) {
+                    // Open file in editor at the specific line
+                    const char *editor = getenv("EDITOR");
+                    if (!editor || !*editor) editor = "vi";
+                    
+                    char qpath[MAX_PATH * 2];
+                    shell_quote_single(qpath, sizeof(qpath), full);
+                    
+                    char cmd[8192];
+                    // Format for vim/nvim: +line, for others try the same
+                    snprintf(cmd, sizeof(cmd), "%s +%d %s", editor, line_num, qpath);
+                    
+                    run_viewer_command(cmd);
+                    load_directory(list, list->cwd);
+                }
+            }
+            break;
+        }
         case 'e':
         case 'E': {
             FILE *ftout = fopen("/tmp/.goto_path", "w");
