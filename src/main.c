@@ -257,7 +257,6 @@ const char* get_file_icon(FileItem *item) {
 
     return ICON_FILE;
 }
-
 int get_file_color(FileItem *item) {
     if (item->is_dir) return 1; 
 
@@ -534,7 +533,7 @@ void draw_help_line(void) {
     attron(COLOR_PAIR(4));
     mvhline(max_y - 1, 0, ' ', max_x);
     mvprintw(max_y - 1, 1,
-             "bs:up h:hidden n:new N:mkdir r:rename d:del /:fzf "
+             "bs:up h:hidden n:new N:mkdir r:rename d:del /:fzf ?:grep t:term"
              "e:edit v:vi p:page s?:sort(sn/ss/st/se/sr) f?:filter(ff/fd/fF/fc) o:cd q:quit");
     attroff(COLOR_PAIR(4));
 }
@@ -744,6 +743,71 @@ static void tmux_stop_left_of_pane(const char *editor_pane_id, int remove_pane) 
     system(cmd);
 }
 
+static char g_terminal_pane_id[128] = {0};
+
+static int tmux_toggle_terminal(const char *cwd) {
+    if (!in_tmux()) {
+        popup_message("Not in tmux", "Terminal toggle only works inside tmux");
+        return -1;
+    }
+
+    // Check if terminal pane already exists
+    if (g_terminal_pane_id[0] != '\0') {
+        // Check if the pane is still alive
+        char check_cmd[512];
+        char qid[256];
+        shell_quote_single(qid, sizeof(qid), g_terminal_pane_id);
+        snprintf(check_cmd, sizeof(check_cmd), 
+                 "tmux display-message -p -t %s '#{pane_id}' 2>/dev/null", qid);
+        
+        FILE *p = popen(check_cmd, "r");
+        if (p) {
+            char buf[128] = {0};
+            int alive = (fgets(buf, sizeof(buf), p) != NULL);
+            pclose(p);
+            
+            if (alive) {
+                // Pane exists, kill it
+                char kill_cmd[512];
+                snprintf(kill_cmd, sizeof(kill_cmd), "tmux kill-pane -t %s", qid);
+                system(kill_cmd);
+                g_terminal_pane_id[0] = '\0';
+                return 0;
+            }
+        }
+        // Pane doesn't exist anymore, reset
+        g_terminal_pane_id[0] = '\0';
+    }
+
+    // Create new terminal pane at bottom
+    char qcwd[MAX_PATH * 2];
+    shell_quote_single(qcwd, sizeof(qcwd), cwd);
+
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+             "tmux split-window -v -p 30 -c %s", qcwd);
+
+    if (system(cmd) != 0) {
+        popup_message("Error", "Failed to create terminal pane");
+        return -1;
+    }
+
+    // Get the pane ID of the newly created pane (it should be the last one)
+    FILE *p = popen("tmux display-message -p '#{pane_id}'", "r");
+    if (p) {
+        char buf[128] = {0};
+        if (fgets(buf, sizeof(buf), p)) {
+            buf[strcspn(buf, "\r\n")] = '\0';
+            strncpy(g_terminal_pane_id, buf, sizeof(g_terminal_pane_id) - 1);
+        }
+        pclose(p);
+    }
+
+    // Switch focus back to the file manager pane
+    system("tmux last-pane");
+
+    return 0;
+}
 static int open_selected_with_tmux_tree(FileList *list,
                                        const char *filetree_cmd,
                                        const char *editor_env,
@@ -896,6 +960,14 @@ case '?': {
                     load_directory(list, list->cwd);
                 }
             }
+            break;
+        }
+          case 't':
+        case 'T': {
+            endwin();
+            tmux_toggle_terminal(list->cwd);
+            refresh();
+            clear();
             break;
         }
         case 'e':
