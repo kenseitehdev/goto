@@ -503,8 +503,16 @@ void draw_status_bar(FileList *list) {
     int max_y, max_x;
     getmaxyx(stdscr, max_y, max_x);
 
+    // Draw white horizontal line above status bar
+    attron(COLOR_PAIR(4));
+    mvhline(max_y - 3, 0, ACS_HLINE, max_x);
+    attroff(COLOR_PAIR(4));
+
+    // Clear the status line without filling
+    move(max_y - 2, 0);
+    clrtoeol();
+
     attron(COLOR_PAIR(8) | A_BOLD);
-    mvhline(max_y - 2, 0, ' ', max_x);
 
     mvprintw(max_y - 2, 1, "NORMAL");
     mvprintw(max_y - 2, 10, "  %s", list->cwd);
@@ -530,8 +538,10 @@ void draw_help_line(void) {
     int max_y, max_x;
     getmaxyx(stdscr, max_y, max_x);
 
+    move(max_y - 1, 0);
+    clrtoeol();
+
     attron(COLOR_PAIR(4));
-    mvhline(max_y - 1, 0, ' ', max_x);
     mvprintw(max_y - 1, 1,
              "bs:up h:hidden n:new N:mkdir r:rename d:del /:fzf ?:grep t:term"
              "e:edit v:vi p:page s?:sort(sn/ss/st/se/sr) f?:filter(ff/fd/fF/fc) o:cd q:quit");
@@ -1222,7 +1232,7 @@ int main(void) {
         init_pair(5, COLOR_BLUE, -1);
         init_pair(6, COLOR_YELLOW, -1);
         init_pair(7, COLOR_RED, -1);
-        init_pair(8, COLOR_BLACK, COLOR_CYAN);
+        init_pair(8, COLOR_WHITE, -1);  // Changed from COLOR_BLACK on COLOR_CYAN
     }
 
     if (load_directory(&list, cwd) != 0) {
@@ -1240,4 +1250,3 @@ int main(void) {
     endwin();
     return 0;
 }
-
