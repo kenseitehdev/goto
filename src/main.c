@@ -993,7 +993,7 @@ case '?': {
             FILE *fbout = fopen("/tmp/.goto_path", "w");
             if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
 
-            const char *filetree_cmd = "watch -c 'lsx -R | fzf --ansi --reverse'";
+const char *filetree_cmd = "lsx -R | fzf --ansi --reverse --bind 'ctrl-r:reload(lsx -R)'";
 
             open_selected_with_tmux_tree(list, filetree_cmd, "vi", "vi");
             break;
