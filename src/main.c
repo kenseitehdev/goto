@@ -514,8 +514,8 @@ void draw_status_bar(FileList *list) {
 
     attron(COLOR_PAIR(8) | A_BOLD);
 
-    mvprintw(max_y - 2, 1, "NORMAL");
-    mvprintw(max_y - 2, 10, "  %s", list->cwd);
+    mvprintw(max_y - 2, 1, "NBL | mode: NORMAL |");
+    mvprintw(max_y - 2, 21, " dir:  %s", list->cwd);
 
     char filt[300];
     filter_label(list, filt, sizeof(filt));
