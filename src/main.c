@@ -30,6 +30,50 @@
 #define ICON_GIT "\ue702"
 #define ICON_HIDDEN "\uea70"
 
+#define ASCII_EMPTYFILE "o"
+#define ASCII_FILE "-"
+#define ASCII_EMPTYDIR "D"
+#define ASCII_DIR "D="
+#define ASCII_HIDDEN_DIR "H"
+#define ASCII_HIDDEN_FILE "h"
+// After your existing #define ICON_* and ASCII_* definitions, add:
+
+#ifndef USE_NERD_FONTS
+    // Redefine all icons as ASCII fallbacks
+    #undef ICON_FOLDER
+    #undef ICON_FOLDER_OPEN
+    #undef ICON_FILE
+    #undef ICON_C
+    #undef ICON_PYTHON
+    #undef ICON_JS
+    #undef ICON_RUST
+    #undef ICON_GO
+    #undef ICON_JSON
+    #undef ICON_MD
+    #undef ICON_YAML
+    #undef ICON_SH
+    #undef ICON_IMG
+    #undef ICON_EXEC
+    #undef ICON_GIT
+    #undef ICON_HIDDEN
+
+    #define ICON_FOLDER ASCII_DIR
+    #define ICON_FOLDER_OPEN ASCII_DIR
+    #define ICON_FILE ASCII_FILE
+    #define ICON_C ASCII_FILE
+    #define ICON_PYTHON ASCII_FILE
+    #define ICON_JS ASCII_FILE
+    #define ICON_RUST ASCII_FILE
+    #define ICON_GO ASCII_FILE
+    #define ICON_JSON ASCII_FILE
+    #define ICON_MD ASCII_FILE
+    #define ICON_YAML ASCII_FILE
+    #define ICON_SH ASCII_FILE
+    #define ICON_IMG ASCII_FILE
+    #define ICON_EXEC ASCII_FILE
+    #define ICON_GIT ASCII_HIDDEN_DIR
+    #define ICON_HIDDEN ASCII_HIDDEN_DIR
+#endif
 typedef enum {
     SORT_NAME = 0,
     SORT_SIZE,
@@ -66,9 +110,9 @@ typedef struct {
     int sort_reverse;
 
     FilterMode filter_mode;
-    char filter_text[256]; 
+    char filter_text[256];
 
-    char pending_prefix;   
+    char pending_prefix;
 
 } FileList;
 
@@ -207,7 +251,7 @@ static int create_new_dir(const char *cwd, const char *name) {
 }
 
 static int delete_item_shallow(const FileItem *item) {
-    if (item->is_dir) return rmdir(item->full_path);  
+    if (item->is_dir) return rmdir(item->full_path);
 
     return unlink(item->full_path);
 }
@@ -258,9 +302,9 @@ const char* get_file_icon(FileItem *item) {
     return ICON_FILE;
 }
 int get_file_color(FileItem *item) {
-    if (item->is_dir) return 1; 
+    if (item->is_dir) return 1;
 
-    if (item->mode & S_IXUSR) return 2; 
+    if (item->mode & S_IXUSR) return 2;
 
     const char *ext = strrchr(item->name, '.');
     if (!ext) return 4;
@@ -277,7 +321,7 @@ int get_file_color(FileItem *item) {
 static const char* file_ext(const char *name) {
     const char *ext = strrchr(name, '.');
     if (!ext || ext == name) return "";
-    return ext + 1; 
+    return ext + 1;
 
 }
 
@@ -363,26 +407,26 @@ static int fzf_grep_search(FileList *list, char *out_file, size_t out_len, int *
     // Parse the output: filename:line:content
     char *colon1 = strchr(buf, ':');
     if (!colon1) return 0;
-    
+
     *colon1 = '\0';
     char *filename = buf;
-    
+
     char *colon2 = strchr(colon1 + 1, ':');
     if (!colon2) {
         *colon1 = ':';
         return 0;
     }
-    
+
     *colon2 = '\0';
     char *linestr = colon1 + 1;
-    
+
     // Extract line number
     *out_line = atoi(linestr);
-    
+
     // Copy filename
     strncpy(out_file, filename, out_len - 1);
     out_file[out_len - 1] = '\0';
-    
+
     return 1;
 }
 static int passes_filter(const FileList *list, const FileItem *item) {
@@ -544,7 +588,7 @@ void draw_help_line(void) {
     attron(COLOR_PAIR(4));
     mvprintw(max_y - 1, 1,
              "bs:up h:hidden n:new N:mkdir r:rename d:del /:fzf ?:grep t:term"
-             "e:edit v:vi p:page s?:sort(sn/ss/st/se/sr) f?:filter(ff/fd/fF/fc) o:cd q:quit");
+             "e:edit v:vic p:page s?:sort(sn/ss/st/se/sr) f?:filter(ff/fd/fF/fc) o:cd q:quit");
     attroff(COLOR_PAIR(4));
 }
 
@@ -613,15 +657,15 @@ static int fzf_select_path(FileList *list, char *out, size_t out_len) {
 
 static void apply_sort_command(FileList *list, int cmd) {
     switch (cmd) {
-        case 'n': list->sort_mode = SORT_NAME; break;   
+        case 'n': list->sort_mode = SORT_NAME; break;
 
-        case 's': list->sort_mode = SORT_SIZE; break;   
+        case 's': list->sort_mode = SORT_SIZE; break;
 
-        case 't': list->sort_mode = SORT_TIME; break;   
+        case 't': list->sort_mode = SORT_TIME; break;
 
-        case 'e': list->sort_mode = SORT_EXT;  break;   
+        case 'e': list->sort_mode = SORT_EXT;  break;
 
-        case 'r': list->sort_reverse = !list->sort_reverse; break; 
+        case 'r': list->sort_reverse = !list->sort_reverse; break;
 
         default: break;
     }
@@ -630,25 +674,25 @@ static void apply_sort_command(FileList *list, int cmd) {
 
 static void apply_filter_command(FileList *list, int cmd) {
     switch (cmd) {
-        case 'f': 
+        case 'f':
 
             list->filter_mode = FILTER_FILES;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
-        case 'd': 
+        case 'd':
 
             list->filter_mode = FILTER_DIRS;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
-        case 'F': 
+        case 'F':
 
             list->filter_mode = FILTER_ALL;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
-        case 'c': { 
+        case 'c': {
 
             char s[256];
             if (popup_prompt(s, sizeof(s), "Filter (contains)", "Substring to match (empty clears):")) {
@@ -767,15 +811,15 @@ static int tmux_toggle_terminal(const char *cwd) {
         char check_cmd[512];
         char qid[256];
         shell_quote_single(qid, sizeof(qid), g_terminal_pane_id);
-        snprintf(check_cmd, sizeof(check_cmd), 
+        snprintf(check_cmd, sizeof(check_cmd),
                  "tmux display-message -p -t %s '#{pane_id}' 2>/dev/null", qid);
-        
+
         FILE *p = popen(check_cmd, "r");
         if (p) {
             char buf[128] = {0};
             int alive = (fgets(buf, sizeof(buf), p) != NULL);
             pclose(p);
-            
+
             if (alive) {
                 // Pane exists, kill it
                 char kill_cmd[512];
@@ -928,7 +972,7 @@ case '?': {
             static int g_pressed = 0;
             static time_t g_time = 0;
             time_t now = time(NULL);
-            
+
             if (g_pressed && (now - g_time) < 1) {
                 // Second 'g' within 1 second - go to top
                 g_pressed = 0;
@@ -936,10 +980,10 @@ case '?': {
                 list->scroll_offset = 0;
                 break;
             }
-            
+
             g_pressed = 1;
             g_time = now;
-            
+
             // Perform grep search
             char rel_file[MAX_PATH];
             int line_num = 0;
@@ -958,14 +1002,14 @@ case '?': {
                     // Open file in editor at the specific line
                     const char *editor = getenv("EDITOR");
                     if (!editor || !*editor) editor = "vi";
-                    
+
                     char qpath[MAX_PATH * 2];
                     shell_quote_single(qpath, sizeof(qpath), full);
-                    
+
                     char cmd[8192];
                     // Format for vim/nvim: +line, for others try the same
                     snprintf(cmd, sizeof(cmd), "%s +%d %s", editor, line_num, qpath);
-                    
+
                     run_viewer_command(cmd);
                     load_directory(list, list->cwd);
                 }
@@ -995,7 +1039,7 @@ case '?': {
 
 const char *filetree_cmd = "lsx -R | fzf --ansi --reverse --bind 'ctrl-r:reload(lsx -R)'";
 
-            open_selected_with_tmux_tree(list, filetree_cmd, "vi", "vi");
+            open_selected_with_tmux_tree(list, filetree_cmd, "vic", "vic");
             break;
         }
 
