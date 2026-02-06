@@ -1,6 +1,6 @@
 # -------- Toolchain --------
 CC ?= clang
-CFLAGS ?= -Wall -Wextra -std=c11
+CFLAGS ?= -Wall -Wextra -std=c11 -DUSE_NERD_FONTS
 CPPFLAGS ?=
 LDFLAGS ?=
 

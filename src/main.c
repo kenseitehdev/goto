@@ -1,3 +1,4 @@
+#define USE_NERD_FONTS
 #include <ncurses.h>
 #include <stdlib.h>
 #include <string.h>
@@ -862,6 +863,7 @@ static int tmux_toggle_terminal(const char *cwd) {
 
     return 0;
 }
+
 static int open_selected_with_tmux_tree(FileList *list,
                                        const char *filetree_cmd,
                                        const char *editor_env,
@@ -947,7 +949,45 @@ static int open_selected_with(FileList *list, const char *envvar, const char *fa
     }
     return 0;
 }
+static int open_with_right_split(FileList *list, const char *envvar, const char *fallback_cmd) {
+    if (list->selected >= list->count) return -1;
 
+    FileItem *item = &list->items[list->selected];
+
+    if (item->is_dir) {
+        popup_message("Nope", "That is a directory. Use 'l' to enter it.");
+        return 0;
+    }
+    if (strcmp(item->name, ".") == 0 || strcmp(item->name, "..") == 0) {
+        popup_message("Nope", "Refusing to open '.' or '..'.");
+        return 0;
+    }
+
+    if (!in_tmux()) {
+        // Fallback to regular opening if not in tmux
+        return open_selected_with(list, envvar, fallback_cmd);
+    }
+
+    const char *tool = getenv(envvar);
+    if (!tool || !*tool) tool = fallback_cmd;
+
+    char qpath[MAX_PATH * 2];
+    shell_quote_single(qpath, sizeof(qpath), item->full_path);
+
+    // Create split on the right at 80% width
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+             "tmux split-window -h -p 80 -c '%s' %s %s",
+             list->cwd, tool, qpath);
+
+    endwin();
+    system(cmd);
+    
+    refresh();
+    clear();
+    
+    return 0;
+}
 void handle_input(FileList *list, int *running) {
     int ch = getch();
     int max_y, max_x;
@@ -1024,14 +1064,13 @@ case '?': {
             clear();
             break;
         }
-        case 'e':
-        case 'E': {
-            FILE *ftout = fopen("/tmp/.goto_path", "w");
-            if (ftout) { fprintf(ftout, "%s", list->cwd); fclose(ftout); }
-            open_selected_with(list, "EDITOR", "vi");
-            break;
-        }
-
+case 'e':
+case 'E': {
+    FILE *ftout = fopen("/tmp/.goto_path", "w");
+    if (ftout) { fprintf(ftout, "%s", list->cwd); fclose(ftout); }
+    open_with_right_split(list, "EDITOR", "vi");
+    break;
+}
         case 'v':
         case 'V': {
             FILE *fbout = fopen("/tmp/.goto_path", "w");
@@ -1043,11 +1082,14 @@ const char *filetree_cmd = "lsx -R | fzf --ansi --reverse --bind 'ctrl-r:reload(
             break;
         }
 
-        case 'p':
-        case 'P':
-            open_selected_with(list, "PAGER", "less -R");
-            break;
+case 'p':
+case 'P': {
+    FILE *fbout = fopen("/tmp/.goto_path", "w");
+    if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
+    open_with_right_split(list, "PAGER", "less -R");    
 
+    break;
+}
         case 'h':
         case 'H':
             list->show_hidden = !list->show_hidden;
