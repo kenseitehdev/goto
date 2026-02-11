@@ -236,7 +236,7 @@ static int command_exists(const char *cmd) {
 
 // returns "nfzf", "fzf", or NULL
 static const char *pick_fuzzy_tool(void) {
-    if (command_exists("nfzf")) return "nfzf";
+    if (command_exists("nf")) return "nf";
     if (command_exists("fzf"))  return "fzf";
     return NULL;
 }
@@ -442,9 +442,9 @@ static int fzf_grep_search(FileList *list, char *out_file, size_t out_len, int *
         "  PREVIEW=\\\"sed -n '1,200p' {1} 2>/dev/null || cat {1}\\\"; "
         "fi; "
 
-        "if command -v nfzf >/dev/null 2>&1; then "
+        "if command -v nf >/dev/null 2>&1; then "
         "  eval \\\"$PRODUCER\\\" | "
-        "  nfzf --ansi --prompt='Grep> ' --height=40%% --reverse --delimiter=: "
+        "  nf --ansi --prompt='Grep> ' --height=40%% --reverse --delimiter=: "
         "       --preview \\\"$PREVIEW\\\" --preview-window='+{2}/2' "
         "       > %s 2> /dev/tty; "   /* IMPORTANT: no '< /dev/tty' for nfzf */
         "elif command -v fzf >/dev/null 2>&1; then "
@@ -464,7 +464,7 @@ static int fzf_grep_search(FileList *list, char *out_file, size_t out_len, int *
         unlink(tmp_template);
 
         if (WIFEXITED(rc) && WEXITSTATUS(rc) == 2) {
-            popup_message("Missing fuzzy finder", "Neither nfzf nor fzf was found in PATH.");
+            popup_message("Missing fuzzy finder", "Neither nf nor fzf was found in PATH.");
             return 0;
         }
 
@@ -712,7 +712,7 @@ static int fuzzy_select_path(FileList *list, char *out, size_t out_len) {
     }
 
     // nfzf is minimal: no flags. fzf supports the UI flags.
-    const int is_nfzf = (strcmp(fz, "nfzf") == 0);
+    const int is_nfzf = (strcmp(fz, "nf") == 0);
 
     char cmd[8192];
     if (is_nfzf) {
