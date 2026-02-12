@@ -236,7 +236,7 @@ static int command_exists(const char *cmd) {
 
 // returns "nfzf", "fzf", or NULL
 static const char *pick_fuzzy_tool(void) {
-    if (command_exists("nf")) return "nf";
+    if (command_exists("ff")) return "ff";
     if (command_exists("fzf"))  return "fzf";
     return NULL;
 }
@@ -414,104 +414,108 @@ static void sort_items_portable(FileList *list) {
     g_sort_ctx = NULL;
 }
 
-static int fzf_grep_search(FileList *list, char *out_file, size_t out_len, int *out_line) {
-    if (!list || !out_file || out_len == 0 || !out_line) return -1;
 
-    out_file[0] = '\0';
+static int ff_grep_selected_file(FileList *list, int *out_line) {
+    if (!list || !out_line) return -1;
     *out_line = 0;
 
-    char tmp_template[] = "/tmp/goto_grep_XXXXXX";
-    int fd = mkstemp(tmp_template);
+    if (list->selected < 0 || list->selected >= list->count) return 0;
+
+    FileItem *it = &list->items[list->selected];
+    if (it->is_dir) {
+        popup_message("Not a file", "Select a file first.");
+        return 0;
+    }
+    if (strcmp(it->name, ".") == 0 || strcmp(it->name, "..") == 0) {
+        popup_message("Nope", "Refusing to search '.' or '..'.");
+        return 0;
+    }
+
+    if (!command_exists("ff")) {
+        popup_message("Missing ff", "Install `ff` or put it in PATH.");
+        return 0;
+    }
+
+    char tmp_out[] = "/tmp/goto_ff_linepick_XXXXXX";
+    int fd = mkstemp(tmp_out);
     if (fd < 0) return -1;
     close(fd);
 
     char qcwd[MAX_PATH * 2];
-    char qtmp[MAX_PATH * 2];
-    shell_quote_single(qcwd, sizeof(qcwd), list->cwd);
-    shell_quote_single(qtmp, sizeof(qtmp), tmp_template);
+    char qfile[MAX_PATH * 2];
+    char qout[MAX_PATH * 2];
 
+    shell_quote_single(qcwd, sizeof(qcwd), list->cwd);
+    shell_quote_single(qfile, sizeof(qfile), it->full_path);
+    shell_quote_single(qout,  sizeof(qout),  tmp_out);
+
+    /* Use nl -ba so ff shows "  123  actual line contents" (no ':' delimiter) */
     char cmd[16384];
     snprintf(cmd, sizeof(cmd),
-        "sh -lc "
-        "\"cd %s && "
-        "if command -v rg >/dev/null 2>&1; then "
-        "  PRODUCER=\\\"rg --line-number --with-filename --no-heading --color=always '' 2>/dev/null\\\"; "
-        "  PREVIEW=\\\"bat --color=always {1} --highlight-line {2} 2>/dev/null || sed -n '1,200p' {1} 2>/dev/null || cat {1}\\\"; "
-        "else "
-        "  PRODUCER=\\\"grep -rn --color=always '' . 2>/dev/null\\\"; "
-        "  PREVIEW=\\\"sed -n '1,200p' {1} 2>/dev/null || cat {1}\\\"; "
-        "fi; "
-
-        "if command -v nf >/dev/null 2>&1; then "
-        "  eval \\\"$PRODUCER\\\" | "
-        "  nf --ansi --prompt='Grep> ' --height=40%% --reverse --delimiter=: "
-        "       --preview \\\"$PREVIEW\\\" --preview-window='+{2}/2' "
-        "       > %s 2> /dev/tty; "   /* IMPORTANT: no '< /dev/tty' for nfzf */
-        "elif command -v fzf >/dev/null 2>&1; then "
-        "  eval \\\"$PRODUCER\\\" | "
-        "  fzf  --ansi --prompt='Grep> ' --height=40%% --reverse --delimiter=: "
-        "       --preview \\\"$PREVIEW\\\" --preview-window='+{2}/2' "
-        "       > %s < /dev/tty 2> /dev/tty; "
-        "else "
-        "  exit 2; "
-        "fi\"",
-        qcwd, qtmp, qtmp
+        "sh -lc \""
+        "cd %s || exit 1; "
+        "nl -ba -- %s | ff > %s 2> /dev/tty"
+        "\"",
+        qcwd, qfile, qout
     );
 
-    int rc = system(cmd);
+    fflush(stdout);
+    fflush(stderr);
+    def_prog_mode();
+    endwin();
 
-    if (rc != 0) {
-        unlink(tmp_template);
+    int sys_rc = system(cmd);
 
-        if (WIFEXITED(rc) && WEXITSTATUS(rc) == 2) {
-            popup_message("Missing fuzzy finder", "Neither nf nor fzf was found in PATH.");
-            return 0;
-        }
+    reset_prog_mode();
+    refresh();
+    clear();
 
-        // Treat ESC/cancel as "no selection"
-        return 0;
-    }
-
-    FILE *fp = fopen(tmp_template, "r");
-    if (!fp) {
-        unlink(tmp_template);
+    if (sys_rc == -1) {
+        unlink(tmp_out);
         return -1;
     }
 
-    char buf[MAX_PATH * 2] = {0};
-    if (!fgets(buf, sizeof(buf), fp)) {
+    int exit_code = 0;
+    if (WIFEXITED(sys_rc)) exit_code = WEXITSTATUS(sys_rc);
+    else {
+        unlink(tmp_out);
+        return 0;
+    }
+
+    if (exit_code != 0) {
+        unlink(tmp_out);
+        return 0;
+    }
+
+    FILE *fp = fopen(tmp_out, "r");
+    if (!fp) {
+        unlink(tmp_out);
+        return -1;
+    }
+
+    char sel[4096] = {0};
+    if (!fgets(sel, sizeof(sel), fp)) {
         fclose(fp);
-        unlink(tmp_template);
+        unlink(tmp_out);
         return 0;
     }
     fclose(fp);
-    unlink(tmp_template);
+    unlink(tmp_out);
 
-    buf[strcspn(buf, "\r\n")] = '\0';
-    if (buf[0] == '\0') return 0;
+    sel[strcspn(sel, "\r\n")] = '\0';
+    if (sel[0] == '\0') return 0;
 
-    // Parse: file:line:...
-    char *colon1 = strchr(buf, ':');
-    if (!colon1) return 0;
-    *colon1 = '\0';
+    /* sel format from nl: "   12\tThe line..." or "   12  The line..." */
+    char *p = sel;
+    while (*p && isspace((unsigned char)*p)) p++;
 
-    char *colon2 = strchr(colon1 + 1, ':');
-    if (!colon2) {
-        *colon1 = ':';
-        return 0;
-    }
-    *colon2 = '\0';
+    char *end = NULL;
+    long ln = strtol(p, &end, 10);
+    if (ln <= 0) return 0;
 
-    const char *filename = buf;
-    const char *linestr  = colon1 + 1;
-
-    *out_line = atoi(linestr);
-    strncpy(out_file, filename, out_len - 1);
-    out_file[out_len - 1] = '\0';
-
+    *out_line = (int)ln;
     return 1;
 }
-
 static int passes_filter(const FileList *list, const FileItem *item) {
     switch (list->filter_mode) {
         case FILTER_ALL:
@@ -712,7 +716,7 @@ static int fuzzy_select_path(FileList *list, char *out, size_t out_len) {
     }
 
     // nfzf is minimal: no flags. fzf supports the UI flags.
-    const int is_nfzf = (strcmp(fz, "nf") == 0);
+    const int is_nfzf = (strcmp(fz, "ff") == 0);
 
     char cmd[8192];
     if (is_nfzf) {
@@ -1083,7 +1087,7 @@ snprintf(cmd, sizeof(cmd),
 static void cmd_show_help(void) {
 const char *fz = pick_fuzzy_tool();
 if (!fz) {
-    popup_message("No fuzzy finder", "Install nfzf or fzf for the help menu.");
+    popup_message("No fuzzy finder", "Install ff or fzf for the help menu.");
     return;
 }
     char help_template[] = "/tmp/goto_help_XXXXXX";
@@ -1187,66 +1191,29 @@ void handle_input(FileList *list, int *running) {
         case 'Q':
             *running = 0;
             break;
+
 case '?': {
-    static int g_pressed = 0;
-    static time_t g_time = 0;
-    time_t now = time(NULL);
-
-    if (g_pressed && (now - g_time) < 1) {
-        // Second '?' within 1 second - ignore (was for gg)
-        g_pressed = 0;
-        break;
-    }
-
-    // Check if next char is 'h' for help
-    nodelay(stdscr, TRUE);
-    int next_ch = getch();
-    nodelay(stdscr, FALSE);
-
-    if (next_ch == 'h') {
-        // Show help
-        cmd_show_help();
-        break;
-    }
-
-    // Otherwise, it's grep search
-    if (next_ch != ERR) {
-        ungetch(next_ch);  // Put it back
-    }
-
-    g_pressed = 1;
-    g_time = now;
-
-    // Perform grep search
-    char rel_file[MAX_PATH];
-    int line_num = 0;
-
-    endwin();
-    int ok = fzf_grep_search(list, rel_file, sizeof(rel_file), &line_num);
-    refresh();
-    clear();
+    int line = 0;
+    int ok = ff_grep_selected_file(list, &line);
 
     if (ok > 0) {
-        char full[MAX_PATH];
-        snprintf(full, sizeof(full), "%s/%s", list->cwd, rel_file);
+        const char *editor = getenv("EDITOR");
+        if (!editor || !*editor) editor = "vi";
 
-        struct stat st;
-        if (lstat(full, &st) == 0 && !S_ISDIR(st.st_mode)) {
-            const char *editor = getenv("EDITOR");
-            if (!editor || !*editor) editor = "vi";
+        FileItem *it = &list->items[list->selected];
 
-            char qpath[MAX_PATH * 2];
-            shell_quote_single(qpath, sizeof(qpath), full);
+        char qpath[MAX_PATH * 2];
+        shell_quote_single(qpath, sizeof(qpath), it->full_path);
 
-            char cmd[8192];
-            snprintf(cmd, sizeof(cmd), "%s +%d %s", editor, line_num, qpath);
+        char ecmd[8192];
+        snprintf(ecmd, sizeof(ecmd), "%s +%d %s", editor, line, qpath);
 
-            run_viewer_command(cmd);
-            load_directory(list, list->cwd);
-        }
+        run_viewer_command(ecmd);
+        load_directory(list, list->cwd);
     }
     break;
 }
+
           case 't':
         case 'T': {
             endwin();
@@ -1474,25 +1441,57 @@ case 'P': {
             break;
     }
 }
+static void expand_tilde(char *out, size_t out_len, const char *in) {
+    if (!out || out_len == 0 || !in) return;
 
-int main(void) {
+    if (in[0] == '~' && (in[1] == '\0' || in[1] == '/')) {
+        const char *home = getenv("HOME");
+        if (!home) home = "";
+
+        snprintf(out, out_len, "%s%s", home, in + 1);
+    } else {
+        snprintf(out, out_len, "%s", in);
+    }
+}
+int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
-    FileList list = {0};
-    char cwd[MAX_PATH];
+
+    FileList list = (FileList){0};
+    char start[MAX_PATH];
 
     list.show_hidden = 0;
-
     list.sort_mode = SORT_NAME;
     list.sort_reverse = 0;
     list.filter_mode = FILTER_ALL;
     list.filter_text[0] = '\0';
     list.pending_prefix = 0;
 
-    if (!getcwd(cwd, sizeof(cwd))) {
+    // Default: start in current working directory
+    if (!getcwd(start, sizeof(start))) {
         perror("getcwd");
         return 1;
     }
 
+    // Optional: env default start path (can be relative to PWD or use ~)
+    const char *env_start = getenv("GOTO_START");
+    if (env_start && *env_start) {
+        char tmp[MAX_PATH];
+        expand_tilde(tmp, sizeof(tmp), env_start);
+        char resolved[MAX_PATH];
+        if (realpath(tmp, resolved)) {
+            strncpy(start, resolved, sizeof(start) - 1);
+            start[sizeof(start) - 1] = '\0';
+        }
+    }
+
+    // Optional: CLI override: goto <path> (relative to PWD is fine)
+if (argc > 1 && argv[1][0]) {
+    char tmp[MAX_PATH];
+    expand_tilde(tmp, sizeof(tmp), argv[1]);
+
+    strncpy(start, tmp, sizeof(start) - 1);
+    start[sizeof(start) - 1] = '\0';
+}
     initscr();
     cbreak();
     noecho();
@@ -1509,12 +1508,12 @@ int main(void) {
         init_pair(5, COLOR_BLUE, -1);
         init_pair(6, COLOR_YELLOW, -1);
         init_pair(7, COLOR_RED, -1);
-        init_pair(8, COLOR_WHITE, -1);  // Changed from COLOR_BLACK on COLOR_CYAN
+        init_pair(8, COLOR_WHITE, -1);
     }
 
-    if (load_directory(&list, cwd) != 0) {
+    if (load_directory(&list, start) != 0) {
         endwin();
-        fprintf(stderr, "Failed to load directory\n");
+        fprintf(stderr, "Failed to load directory: %s\n", start);
         return 1;
     }
 
