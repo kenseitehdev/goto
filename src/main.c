@@ -1466,32 +1466,46 @@ int main(int argc, char **argv) {
     list.filter_text[0] = '\0';
     list.pending_prefix = 0;
 
-    // Default: start in current working directory
+    /* 1) Always initialize start to PWD first */
     if (!getcwd(start, sizeof(start))) {
         perror("getcwd");
         return 1;
     }
 
-    // Optional: env default start path (can be relative to PWD or use ~)
+    /* 2) If GOTO_START is set, try it (but don't break if it fails) */
     const char *env_start = getenv("GOTO_START");
     if (env_start && *env_start) {
         char tmp[MAX_PATH];
         expand_tilde(tmp, sizeof(tmp), env_start);
+
+        // let load_directory resolve; but we can attempt realpath for niceness
         char resolved[MAX_PATH];
         if (realpath(tmp, resolved)) {
             strncpy(start, resolved, sizeof(start) - 1);
             start[sizeof(start) - 1] = '\0';
+        } else {
+            // fallback: use tmp as-is (relative allowed)
+            strncpy(start, tmp, sizeof(start) - 1);
+            start[sizeof(start) - 1] = '\0';
         }
     }
 
-    // Optional: CLI override: goto <path> (relative to PWD is fine)
-if (argc > 1 && argv[1][0]) {
-    char tmp[MAX_PATH];
-    expand_tilde(tmp, sizeof(tmp), argv[1]);
+    /* 3) CLI path overrides env var (relative allowed) */
+    if (argc > 1 && argv[1] && argv[1][0]) {
+        char tmp[MAX_PATH];
+        expand_tilde(tmp, sizeof(tmp), argv[1]);
 
-    strncpy(start, tmp, sizeof(start) - 1);
-    start[sizeof(start) - 1] = '\0';
-}
+        // same deal: resolve if possible, otherwise use as-is
+        char resolved[MAX_PATH];
+        if (realpath(tmp, resolved)) {
+            strncpy(start, resolved, sizeof(start) - 1);
+            start[sizeof(start) - 1] = '\0';
+        } else {
+            strncpy(start, tmp, sizeof(start) - 1);
+            start[sizeof(start) - 1] = '\0';
+        }
+    }
+
     initscr();
     cbreak();
     noecho();
@@ -1514,6 +1528,7 @@ if (argc > 1 && argv[1][0]) {
     if (load_directory(&list, start) != 0) {
         endwin();
         fprintf(stderr, "Failed to load directory: %s\n", start);
+        perror("load_directory");
         return 1;
     }
 
