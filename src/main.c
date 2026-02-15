@@ -1,19 +1,26 @@
-//goto
+//goto - Fixed version with security improvements and bug fixes
+#ifndef USE_NERD_FONTS
 #define USE_NERD_FONTS
+#endif
 #include <ncurses.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <locale.h>
 #include <errno.h>
 #include <ctype.h>
 #include <time.h>
+#include <signal.h>
+#include <limits.h>
+#include <fcntl.h>
 
 #define MAX_PATH 4096
 #define MAX_ITEMS 1024
+#define QUOTE_BUF_SIZE (MAX_PATH * 4 + 4)
 
 #define ICON_FOLDER "\ue5ff"
 #define ICON_FOLDER_OPEN "\uf07c"
@@ -38,8 +45,12 @@
 #define ASCII_DIR "D="
 #define ASCII_HIDDEN_DIR "H"
 #define ASCII_HIDDEN_FILE "h"
-// After your existing #define ICON_* and ASCII_* definitions, add:
+
+// Forward declarations
 static void shell_quote_single(char *out, size_t out_len, const char *in);
+static void cleanup_handler(int sig);
+static void register_signal_handlers(void);
+
 #ifndef USE_NERD_FONTS
     // Redefine all icons as ASCII fallbacks
     #undef ICON_FOLDER
@@ -76,6 +87,7 @@ static void shell_quote_single(char *out, size_t out_len, const char *in);
     #define ICON_GIT ASCII_HIDDEN_DIR
     #define ICON_HIDDEN ASCII_HIDDEN_DIR
 #endif
+
 typedef enum {
     SORT_NAME = 0,
     SORT_SIZE,
@@ -117,6 +129,40 @@ typedef struct {
     char pending_prefix;
 
 } FileList;
+
+// Global state for cleanup
+static char g_terminal_pane_id[128] = {0};
+static char g_temp_files[10][PATH_MAX] = {{0}};
+static int g_temp_file_count = 0;
+
+// Signal handler for cleanup on interrupt
+static void cleanup_handler(int sig) {
+    (void)sig;
+    endwin();
+    
+    // Clean up temp files
+    for (int i = 0; i < g_temp_file_count; i++) {
+        if (g_temp_files[i][0] != '\0') {
+            unlink(g_temp_files[i]);
+        }
+    }
+    
+    exit(0);
+}
+
+static void register_signal_handlers(void) {
+    signal(SIGINT, cleanup_handler);
+    signal(SIGTERM, cleanup_handler);
+}
+
+static void register_temp_file(const char *path) {
+    if (g_temp_file_count < 10 && path && *path) {
+        strncpy(g_temp_files[g_temp_file_count], path, PATH_MAX - 1);
+        g_temp_files[g_temp_file_count][PATH_MAX - 1] = '\0';
+        g_temp_file_count++;
+    }
+}
+
 static void popup_message(const char *title, const char *message) {
     int max_y, max_x;
     getmaxyx(stdscr, max_y, max_x);
@@ -130,6 +176,8 @@ static void popup_message(const char *title, const char *message) {
     int x = (max_x - w) / 2;
 
     WINDOW *win = newwin(h, w, y, x);
+    if (!win) return;
+    
     keypad(win, TRUE);
     box(win, 0, 0);
 
@@ -157,6 +205,8 @@ static int popup_confirm(const char *title, const char *message) {
     int x = (max_x - w) / 2;
 
     WINDOW *win = newwin(h, w, y, x);
+    if (!win) return 0;
+    
     keypad(win, TRUE);
     box(win, 0, 0);
 
@@ -191,6 +241,8 @@ static int popup_prompt(char *out, size_t out_len, const char *title, const char
     int x = (max_x - w) / 2;
 
     WINDOW *win = newwin(h, w, y, x);
+    if (!win) return 0;
+    
     keypad(win, TRUE);
     box(win, 0, 0);
 
@@ -227,14 +279,25 @@ static int popup_prompt(char *out, size_t out_len, const char *title, const char
     out[out_len - 1] = '\0';
     return 1;
 }
+
 static int command_exists(const char *cmd) {
     if (!cmd || !*cmd) return 0;
+    
+    // Validate command name (no shell metacharacters)
+    for (const char *p = cmd; *p; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') {
+            return 0;
+        }
+    }
+    
     char buf[512];
-    snprintf(buf, sizeof(buf), "command -v %s >/dev/null 2>&1", cmd);
+    int ret = snprintf(buf, sizeof(buf), "command -v %s >/dev/null 2>&1", cmd);
+    if (ret < 0 || ret >= (int)sizeof(buf)) return 0;
+    
     return system(buf) == 0;
 }
 
-// returns "nfzf", "fzf", or NULL
+// returns "ff", "fzf", or NULL
 static const char *pick_fuzzy_tool(void) {
     if (command_exists("ff")) return "ff";
     if (command_exists("fzf"))  return "fzf";
@@ -266,36 +329,60 @@ static int manual_select_in_list(FileList *list) {
     popup_message("No match", "No items matched your query.");
     return 0;
 }
+
 static int create_new_file(const char *cwd, const char *name) {
+    // Validate name
+    if (!name || !*name || strchr(name, '/') || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     char path[MAX_PATH];
-    snprintf(path, sizeof(path), "%s/%s", cwd, name);
+    int ret = snprintf(path, sizeof(path), "%s/%s", cwd, name);
+    if (ret < 0 || ret >= (int)sizeof(path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
 
-    struct stat st;
-    if (lstat(path, &st) == 0) { errno = EEXIST; return -1; }
-
-    FILE *f = fopen(path, "wb");
-    if (!f) return -1;
-    fclose(f);
+    // Use O_EXCL to atomically fail if file exists (prevents TOCTOU)
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) return -1;
+    
+    close(fd);
     return 0;
 }
 
 static int create_new_dir(const char *cwd, const char *name) {
+    // Validate name
+    if (!name || !*name || strchr(name, '/') || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     char path[MAX_PATH];
-    snprintf(path, sizeof(path), "%s/%s", cwd, name);
+    int ret = snprintf(path, sizeof(path), "%s/%s", cwd, name);
+    if (ret < 0 || ret >= (int)sizeof(path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
 
-    struct stat st;
-    if (lstat(path, &st) == 0) { errno = EEXIST; return -1; }
-
+    // mkdir with O_EXCL behavior is atomic
     return mkdir(path, 0755);
 }
 
 static int delete_item_shallow(const FileItem *item) {
     if (item->is_dir) return rmdir(item->full_path);
-
     return unlink(item->full_path);
 }
 
 static int rename_item(const FileItem *item, const char *new_name) {
+    // Validate new name
+    if (!new_name || !*new_name || strchr(new_name, '/') || 
+        strcmp(new_name, ".") == 0 || strcmp(new_name, "..") == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     char dirbuf[MAX_PATH];
     strncpy(dirbuf, item->full_path, sizeof(dirbuf) - 1);
     dirbuf[sizeof(dirbuf) - 1] = '\0';
@@ -305,10 +392,11 @@ static int rename_item(const FileItem *item, const char *new_name) {
     *slash = '\0';
 
     char new_path[MAX_PATH];
-    snprintf(new_path, sizeof(new_path), "%s/%s", dirbuf, new_name);
-
-    struct stat st;
-    if (lstat(new_path, &st) == 0) { errno = EEXIST; return -1; }
+    int ret = snprintf(new_path, sizeof(new_path), "%s/%s", dirbuf, new_name);
+    if (ret < 0 || ret >= (int)sizeof(new_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
 
     return rename(item->full_path, new_path);
 }
@@ -340,6 +428,7 @@ const char* get_file_icon(FileItem *item) {
 
     return ICON_FILE;
 }
+
 int get_file_color(FileItem *item) {
     if (item->is_dir) return 1;
 
@@ -361,7 +450,6 @@ static const char* file_ext(const char *name) {
     const char *ext = strrchr(name, '.');
     if (!ext || ext == name) return "";
     return ext + 1;
-
 }
 
 static int compare_items(const void *a, const void *b, void *ctx) {
@@ -404,16 +492,38 @@ static int compare_items(const void *a, const void *b, void *ctx) {
     return list->sort_reverse ? -r : r;
 }
 
+// Thread-safe sorting using qsort_r when available
+#if defined(__APPLE__)
+// macOS has different signature: context comes first
+static int compare_items_wrapper(void *ctx, const void *a, const void *b) {
+    return compare_items(a, b, ctx);
+}
+
+static void sort_items_portable(FileList *list) {
+    qsort_r(list->items, list->count, sizeof(FileItem), list, compare_items_wrapper);
+}
+#elif defined(__GLIBC__)
+// glibc has context last
+static int compare_items_wrapper(const void *a, const void *b, void *ctx) {
+    return compare_items(a, b, ctx);
+}
+
+static void sort_items_portable(FileList *list) {
+    qsort_r(list->items, list->count, sizeof(FileItem), compare_items_wrapper, list);
+}
+#else
+// Fallback for systems without qsort_r
 static FileList *g_sort_ctx = NULL;
 static int compare_items_static(const void *a, const void *b) {
     return compare_items(a, b, g_sort_ctx);
 }
+
 static void sort_items_portable(FileList *list) {
     g_sort_ctx = list;
     qsort(list->items, list->count, sizeof(FileItem), compare_items_static);
     g_sort_ctx = NULL;
 }
-
+#endif
 
 static int ff_grep_selected_file(FileList *list, int *out_line) {
     if (!list || !out_line) return -1;
@@ -440,10 +550,11 @@ static int ff_grep_selected_file(FileList *list, int *out_line) {
     int fd = mkstemp(tmp_out);
     if (fd < 0) return -1;
     close(fd);
+    register_temp_file(tmp_out);
 
-    char qcwd[MAX_PATH * 2];
-    char qfile[MAX_PATH * 2];
-    char qout[MAX_PATH * 2];
+    char qcwd[QUOTE_BUF_SIZE];
+    char qfile[QUOTE_BUF_SIZE];
+    char qout[QUOTE_BUF_SIZE];
 
     shell_quote_single(qcwd, sizeof(qcwd), list->cwd);
     shell_quote_single(qfile, sizeof(qfile), it->full_path);
@@ -451,13 +562,18 @@ static int ff_grep_selected_file(FileList *list, int *out_line) {
 
     /* Use nl -ba so ff shows "  123  actual line contents" (no ':' delimiter) */
     char cmd[16384];
-    snprintf(cmd, sizeof(cmd),
+    int ret = snprintf(cmd, sizeof(cmd),
         "sh -lc \""
         "cd %s || exit 1; "
         "nl -ba -- %s | ff > %s 2> /dev/tty"
         "\"",
         qcwd, qfile, qout
     );
+    
+    if (ret < 0 || ret >= (int)sizeof(cmd)) {
+        unlink(tmp_out);
+        return -1;
+    }
 
     fflush(stdout);
     fflush(stderr);
@@ -516,6 +632,7 @@ static int ff_grep_selected_file(FileList *list, int *out_line) {
     *out_line = (int)ln;
     return 1;
 }
+
 static int passes_filter(const FileList *list, const FileItem *item) {
     switch (list->filter_mode) {
         case FILTER_ALL:
@@ -563,7 +680,8 @@ int load_directory(FileList *list, const char *path) {
         strncpy(tmp.name, entry->d_name, 255);
         tmp.name[255] = '\0';
 
-        snprintf(tmp.full_path, MAX_PATH, "%s/%s", list->cwd, entry->d_name);
+        int ret = snprintf(tmp.full_path, MAX_PATH, "%s/%s", list->cwd, entry->d_name);
+        if (ret < 0 || ret >= MAX_PATH) continue;
 
         struct stat st;
         if (lstat(tmp.full_path, &st) == 0) {
@@ -715,25 +833,32 @@ static int fuzzy_select_path(FileList *list, char *out, size_t out_len) {
         return 0;
     }
 
+    // Quote cwd properly
+    char qcwd[QUOTE_BUF_SIZE];
+    shell_quote_single(qcwd, sizeof(qcwd), list->cwd);
+
     // nfzf is minimal: no flags. fzf supports the UI flags.
     const int is_nfzf = (strcmp(fz, "ff") == 0);
 
     char cmd[8192];
+    int ret;
     if (is_nfzf) {
-        snprintf(cmd, sizeof(cmd),
-                 "cd '%s' && "
+        ret = snprintf(cmd, sizeof(cmd),
+                 "cd %s && "
                  "find . -maxdepth 5 -mindepth 1 2>/dev/null | "
                  "sed 's#^\\./##' | "
                  "%s",
-                 list->cwd, fz);
+                 qcwd, fz);
     } else {
-        snprintf(cmd, sizeof(cmd),
-                 "cd '%s' && "
+        ret = snprintf(cmd, sizeof(cmd),
+                 "cd %s && "
                  "find . -maxdepth 5 -mindepth 1 2>/dev/null | "
                  "sed 's#^\\./##' | "
                  "%s --prompt='Search> ' --height=40%% --reverse",
-                 list->cwd, fz);
+                 qcwd, fz);
     }
+    
+    if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
 
     FILE *p = popen(cmd, "r");
     if (!p) return -1;
@@ -756,15 +881,10 @@ static int fuzzy_select_path(FileList *list, char *out, size_t out_len) {
 static void apply_sort_command(FileList *list, int cmd) {
     switch (cmd) {
         case 'n': list->sort_mode = SORT_NAME; break;
-
         case 's': list->sort_mode = SORT_SIZE; break;
-
         case 't': list->sort_mode = SORT_TIME; break;
-
         case 'e': list->sort_mode = SORT_EXT;  break;
-
         case 'r': list->sort_reverse = !list->sort_reverse; break;
-
         default: break;
     }
     load_directory(list, list->cwd);
@@ -773,25 +893,21 @@ static void apply_sort_command(FileList *list, int cmd) {
 static void apply_filter_command(FileList *list, int cmd) {
     switch (cmd) {
         case 'f':
-
             list->filter_mode = FILTER_FILES;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
         case 'd':
-
             list->filter_mode = FILTER_DIRS;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
         case 'F':
-
             list->filter_mode = FILTER_ALL;
             list->filter_text[0] = '\0';
             load_directory(list, list->cwd);
             break;
         case 'c': {
-
             char s[256];
             if (popup_prompt(s, sizeof(s), "Filter (contains)", "Substring to match (empty clears):")) {
                 list->filter_mode = FILTER_CONTAINS;
@@ -809,25 +925,55 @@ static void apply_filter_command(FileList *list, int cmd) {
     }
 }
 
+// FIXED: Proper shell quoting that checks bounds before writing
 static void shell_quote_single(char *out, size_t out_len, const char *in) {
+    if (!out || out_len < 3 || !in) {
+        if (out && out_len > 0) out[0] = '\0';
+        return;
+    }
 
     size_t j = 0;
-    if (out_len == 0) return;
-
+    
+    // Check space for opening quote
+    if (j + 1 >= out_len) {
+        out[0] = '\0';
+        return;
+    }
     out[j++] = '\'';
-    for (size_t i = 0; in[i] != '\0' && j + 6 < out_len; i++) {
+    
+    for (size_t i = 0; in[i] != '\0'; i++) {
         if (in[i] == '\'') {
+            // Need 5 chars for '"'"' plus null terminator
+            if (j + 6 >= out_len) {
+                out[0] = '\0';
+                return;
+            }
             const char *esc = "'\"'\"'";
-            for (int k = 0; esc[k] && j + 1 < out_len; k++) out[j++] = esc[k];
+            for (int k = 0; esc[k]; k++) {
+                out[j++] = esc[k];
+            }
         } else {
+            // Need 1 char plus room for closing quote and null
+            if (j + 3 >= out_len) {
+                out[0] = '\0';
+                return;
+            }
             out[j++] = in[i];
         }
     }
-    if (j + 1 < out_len) out[j++] = '\'';
+    
+    // Add closing quote
+    if (j + 2 >= out_len) {
+        out[0] = '\0';
+        return;
+    }
+    out[j++] = '\'';
     out[j] = '\0';
 }
 
 static int run_viewer_command(const char *cmd) {
+    if (!cmd || !*cmd) return -1;
+    
     endwin();
     int rc = system(cmd);
     refresh();
@@ -860,15 +1006,19 @@ static int tmux_get_current_pane_id(char *out, size_t out_len) {
 }
 
 static int tmux_split_left_detached(const char *cwd, const char *filetree_cmd) {
-    char qcwd[MAX_PATH * 2];
-    char qscript[2048];
+    char qcwd[QUOTE_BUF_SIZE];
+    char qscript[QUOTE_BUF_SIZE * 2];
     shell_quote_single(qcwd, sizeof(qcwd), cwd);
     shell_quote_single(qscript, sizeof(qscript), filetree_cmd);
+    
+    if (qcwd[0] == '\0' || qscript[0] == '\0') return -1;
 
     char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
+    int ret = snprintf(cmd, sizeof(cmd),
              "tmux split-window -d -h -b -p 25 -c %s sh -lc %s",
              qcwd, qscript);
+    
+    if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
 
     return system(cmd);
 }
@@ -876,26 +1026,29 @@ static int tmux_split_left_detached(const char *cwd, const char *filetree_cmd) {
 static void tmux_stop_left_of_pane(const char *editor_pane_id, int remove_pane) {
     char qid[256];
     shell_quote_single(qid, sizeof(qid), editor_pane_id);
+    
+    if (qid[0] == '\0') return;
 
     char cmd[2048];
+    int ret;
 
     if (remove_pane) {
-        snprintf(cmd, sizeof(cmd),
+        ret = snprintf(cmd, sizeof(cmd),
                  "tmux select-pane -t %s \\; "
                  "send-keys -t '{left-of}' C-c \\; "
                  "kill-pane -t '{left-of}'",
                  qid);
     } else {
-        snprintf(cmd, sizeof(cmd),
+        ret = snprintf(cmd, sizeof(cmd),
                  "tmux select-pane -t %s \\; "
                  "send-keys -t '{left-of}' C-c",
                  qid);
     }
+    
+    if (ret < 0 || ret >= (int)sizeof(cmd)) return;
 
     system(cmd);
 }
-
-static char g_terminal_pane_id[128] = {0};
 
 static int tmux_toggle_terminal(const char *cwd) {
     if (!in_tmux()) {
@@ -909,8 +1062,19 @@ static int tmux_toggle_terminal(const char *cwd) {
         char check_cmd[512];
         char qid[256];
         shell_quote_single(qid, sizeof(qid), g_terminal_pane_id);
-        snprintf(check_cmd, sizeof(check_cmd),
+        
+        if (qid[0] == '\0') {
+            g_terminal_pane_id[0] = '\0';
+            return -1;
+        }
+        
+        int ret = snprintf(check_cmd, sizeof(check_cmd),
                  "tmux display-message -p -t %s '#{pane_id}' 2>/dev/null", qid);
+        
+        if (ret < 0 || ret >= (int)sizeof(check_cmd)) {
+            g_terminal_pane_id[0] = '\0';
+            return -1;
+        }
 
         FILE *p = popen(check_cmd, "r");
         if (p) {
@@ -921,8 +1085,10 @@ static int tmux_toggle_terminal(const char *cwd) {
             if (alive) {
                 // Pane exists, kill it
                 char kill_cmd[512];
-                snprintf(kill_cmd, sizeof(kill_cmd), "tmux kill-pane -t %s", qid);
-                system(kill_cmd);
+                ret = snprintf(kill_cmd, sizeof(kill_cmd), "tmux kill-pane -t %s", qid);
+                if (ret > 0 && ret < (int)sizeof(kill_cmd)) {
+                    system(kill_cmd);
+                }
                 g_terminal_pane_id[0] = '\0';
                 return 0;
             }
@@ -932,25 +1098,30 @@ static int tmux_toggle_terminal(const char *cwd) {
     }
 
     // Create new terminal pane at bottom
-    char qcwd[MAX_PATH * 2];
+    char qcwd[QUOTE_BUF_SIZE];
     shell_quote_single(qcwd, sizeof(qcwd), cwd);
+    
+    if (qcwd[0] == '\0') return -1;
 
     char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
+    int ret = snprintf(cmd, sizeof(cmd),
              "tmux split-window -v -p 30 -c %s", qcwd);
+    
+    if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
 
     if (system(cmd) != 0) {
         popup_message("Error", "Failed to create terminal pane");
         return -1;
     }
 
-    // Get the pane ID of the newly created pane (it should be the last one)
+    // Get the pane ID of the newly created pane
     FILE *p = popen("tmux display-message -p '#{pane_id}'", "r");
     if (p) {
         char buf[128] = {0};
         if (fgets(buf, sizeof(buf), p)) {
             buf[strcspn(buf, "\r\n")] = '\0';
             strncpy(g_terminal_pane_id, buf, sizeof(g_terminal_pane_id) - 1);
+            g_terminal_pane_id[sizeof(g_terminal_pane_id) - 1] = '\0';
         }
         pclose(p);
     }
@@ -959,6 +1130,19 @@ static int tmux_toggle_terminal(const char *cwd) {
     system("tmux last-pane");
 
     return 0;
+}
+
+// Validate editor command to prevent shell injection
+static int validate_editor(const char *editor) {
+    if (!editor || !*editor) return 0;
+    
+    // Allow alphanumeric, dash, underscore, slash, and dot
+    for (const char *p = editor; *p; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_' && *p != '/' && *p != '.') {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int open_selected_with_tmux_tree(FileList *list,
@@ -979,13 +1163,22 @@ static int open_selected_with_tmux_tree(FileList *list,
 
     const char *editor = getenv(editor_env);
     if (!editor || !*editor) editor = editor_fallback;
+    
+    // Validate editor
+    if (!validate_editor(editor)) {
+        popup_message("Error", "Invalid editor command");
+        return -1;
+    }
 
-    char qpath[MAX_PATH * 2];
+    char qpath[QUOTE_BUF_SIZE];
     shell_quote_single(qpath, sizeof(qpath), item->full_path);
+    
+    if (qpath[0] == '\0') return -1;
 
     if (!in_tmux()) {
         char cmd[8192];
-        snprintf(cmd, sizeof(cmd), "%s %s", editor, qpath);
+        int ret = snprintf(cmd, sizeof(cmd), "%s %s", editor, qpath);
+        if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
         return run_viewer_command(cmd);
     }
 
@@ -995,7 +1188,8 @@ static int open_selected_with_tmux_tree(FileList *list,
 
     if (tmux_get_current_pane_id(editor_pane_id, sizeof(editor_pane_id)) != 0) {
         char cmd[8192];
-        snprintf(cmd, sizeof(cmd), "%s %s", editor, qpath);
+        int ret = snprintf(cmd, sizeof(cmd), "%s %s", editor, qpath);
+        if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
         int rc = system(cmd);
         refresh();
         clear();
@@ -1005,7 +1199,13 @@ static int open_selected_with_tmux_tree(FileList *list,
     tmux_split_left_detached(list->cwd, filetree_cmd);
 
     char editcmd[8192];
-    snprintf(editcmd, sizeof(editcmd), "%s %s", editor, qpath);
+    int ret = snprintf(editcmd, sizeof(editcmd), "%s %s", editor, qpath);
+    if (ret < 0 || ret >= (int)sizeof(editcmd)) {
+        refresh();
+        clear();
+        return -1;
+    }
+    
     int rc = system(editcmd);
 
     tmux_stop_left_of_pane(editor_pane_id, 1);
@@ -1025,18 +1225,27 @@ static int open_selected_with(FileList *list, const char *envvar, const char *fa
         return 0;
     }
     if (strcmp(item->name, ".") == 0 || strcmp(item->name, "..") == 0) {
-        popup_message("Nope", "Refusing to open '.' or '..'.");
+        popup_message("Nope", "Refusing to open '.' or '.''.");
         return 0;
     }
 
     const char *tool = getenv(envvar);
     if (!tool || !*tool) tool = fallback_cmd;
+    
+    // Validate tool
+    if (!validate_editor(tool)) {
+        popup_message("Error", "Invalid tool command");
+        return -1;
+    }
 
-    char qpath[MAX_PATH * 2];
+    char qpath[QUOTE_BUF_SIZE];
     shell_quote_single(qpath, sizeof(qpath), item->full_path);
+    
+    if (qpath[0] == '\0') return -1;
 
     char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "%s %s", tool, qpath);
+    int ret = snprintf(cmd, sizeof(cmd), "%s %s", tool, qpath);
+    if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
 
     int rc = run_viewer_command(cmd);
     if (rc != 0) {
@@ -1046,6 +1255,7 @@ static int open_selected_with(FileList *list, const char *envvar, const char *fa
     }
     return 0;
 }
+
 static int open_with_right_split(FileList *list, const char *envvar, const char *fallback_cmd) {
     if (list->selected >= list->count) return -1;
 
@@ -1067,16 +1277,28 @@ static int open_with_right_split(FileList *list, const char *envvar, const char 
 
     const char *tool = getenv(envvar);
     if (!tool || !*tool) tool = fallback_cmd;
+    
+    // Validate tool
+    if (!validate_editor(tool)) {
+        popup_message("Error", "Invalid tool command");
+        return -1;
+    }
 
-    char qpath[MAX_PATH * 2];
+    char qpath[QUOTE_BUF_SIZE];
+    char qcwd[QUOTE_BUF_SIZE];
     shell_quote_single(qpath, sizeof(qpath), item->full_path);
+    shell_quote_single(qcwd, sizeof(qcwd), list->cwd);
+    
+    if (qpath[0] == '\0' || qcwd[0] == '\0') return -1;
 
     // Create split on the right at 80% width and run tool in a shell wrapper
-    // that kills the pane after the tool exits
     char cmd[8192];
-snprintf(cmd, sizeof(cmd),
-         "tmux split-window -h -p 80 -c '%s' 'sh -lc \"%s %s; tmux kill-pane\"'",
-         list->cwd, tool, qpath);
+    int ret = snprintf(cmd, sizeof(cmd),
+             "tmux split-window -h -p 80 -c %s 'sh -lc \"%s %s; tmux kill-pane\"'",
+             qcwd, tool, qpath);
+    
+    if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
+    
     endwin();
     system(cmd);
     refresh();
@@ -1084,18 +1306,21 @@ snprintf(cmd, sizeof(cmd),
 
     return 0;
 }
+
 static void cmd_show_help(void) {
-const char *fz = pick_fuzzy_tool();
-if (!fz) {
-    popup_message("No fuzzy finder", "Install ff or fzf for the help menu.");
-    return;
-}
+    const char *fz = pick_fuzzy_tool();
+    if (!fz) {
+        popup_message("No fuzzy finder", "Install ff or fzf for the help menu.");
+        return;
+    }
+    
     char help_template[] = "/tmp/goto_help_XXXXXX";
     int fd = mkstemp(help_template);
     if (fd < 0) {
         popup_message("Error", "Failed to create temp file");
         return;
     }
+    register_temp_file(help_template);
 
     FILE *help_file = fdopen(fd, "w");
     if (!help_file) {
@@ -1114,7 +1339,7 @@ if (!fz) {
     fprintf(help_file, "g               | Jump to top\n");
     fprintf(help_file, "G               | Jump to bottom\n");
     fprintf(help_file, "/               | Fuzzy search files (fzf)\n");
-    fprintf(help_file, "?               | Grep search in files (fzf + rg/grep)\n");
+    fprintf(help_file, "?               | Grep search in selected file (ff + nl)\n");
     fprintf(help_file, "o               | Set current dir and quit (for shell integration)\n");
     fprintf(help_file, "\n");
 
@@ -1126,9 +1351,9 @@ if (!fz) {
     fprintf(help_file, "\n");
 
     fprintf(help_file, "=== OPEN WITH ===\n");
-    fprintf(help_file, "e               | Open with $EDITOR (default: vi)\n");
+    fprintf(help_file, "e               | Open with $EDITOR in right split (default: vi)\n");
     fprintf(help_file, "v               | Open with $vic in tmux split with file tree\n");
-    fprintf(help_file, "p               | Open with $PAGER (default: less -R)\n");
+    fprintf(help_file, "p               | Open with $PAGER in right split (default: less -R)\n");
     fprintf(help_file, "t               | Toggle terminal pane (tmux only)\n");
     fprintf(help_file, "\n");
 
@@ -1153,17 +1378,22 @@ if (!fz) {
 
     fprintf(help_file, "=== OTHER ===\n");
     fprintf(help_file, "q               | Quit\n");
-    fprintf(help_file, "?h              | Show this help\n");
+    fprintf(help_file, "H               | Show this help\n");
 
     fflush(help_file);
     fclose(help_file);
 
     char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
+    int ret = snprintf(cmd, sizeof(cmd),
         "fzf --height=100%% --layout=reverse --border "
         "--header='GoTo Help - Search commands (ESC to close)' "
         "< \"%s\" > /dev/null 2> /dev/tty",
         help_template);
+    
+    if (ret < 0 || ret >= (int)sizeof(cmd)) {
+        unlink(help_template);
+        return;
+    }
 
     endwin();
     system(cmd);
@@ -1172,6 +1402,7 @@ if (!fz) {
 
     unlink(help_template);
 }
+
 void handle_input(FileList *list, int *running) {
     int ch = getch();
     int max_y, max_x;
@@ -1192,29 +1423,37 @@ void handle_input(FileList *list, int *running) {
             *running = 0;
             break;
 
-case '?': {
-    int line = 0;
-    int ok = ff_grep_selected_file(list, &line);
+        case '?': {
+            int line = 0;
+            int ok = ff_grep_selected_file(list, &line);
 
-    if (ok > 0) {
-        const char *editor = getenv("EDITOR");
-        if (!editor || !*editor) editor = "vi";
+            if (ok > 0) {
+                const char *editor = getenv("EDITOR");
+                if (!editor || !*editor) editor = "vi";
+                
+                if (!validate_editor(editor)) {
+                    popup_message("Error", "Invalid EDITOR environment variable");
+                    break;
+                }
 
-        FileItem *it = &list->items[list->selected];
+                FileItem *it = &list->items[list->selected];
 
-        char qpath[MAX_PATH * 2];
-        shell_quote_single(qpath, sizeof(qpath), it->full_path);
+                char qpath[QUOTE_BUF_SIZE];
+                shell_quote_single(qpath, sizeof(qpath), it->full_path);
+                
+                if (qpath[0] == '\0') break;
 
-        char ecmd[8192];
-        snprintf(ecmd, sizeof(ecmd), "%s +%d %s", editor, line, qpath);
+                char ecmd[8192];
+                int ret = snprintf(ecmd, sizeof(ecmd), "%s +%d %s", editor, line, qpath);
+                if (ret < 0 || ret >= (int)sizeof(ecmd)) break;
 
-        run_viewer_command(ecmd);
-        load_directory(list, list->cwd);
-    }
-    break;
-}
+                run_viewer_command(ecmd);
+                load_directory(list, list->cwd);
+            }
+            break;
+        }
 
-          case 't':
+        case 't':
         case 'T': {
             endwin();
             tmux_toggle_terminal(list->cwd);
@@ -1222,36 +1461,41 @@ case '?': {
             clear();
             break;
         }
-case 'e':
-case 'E': {
-    FILE *ftout = fopen("/tmp/.goto_path", "w");
-    if (ftout) { fprintf(ftout, "%s", list->cwd); fclose(ftout); }
-    open_with_right_split(list, "EDITOR", "vi");
-    break;
-}
+
+        case 'e':
+        case 'E': {
+            FILE *ftout = fopen("/tmp/.goto_path", "w");
+            if (ftout) { fprintf(ftout, "%s", list->cwd); fclose(ftout); }
+            open_with_right_split(list, "EDITOR", "vi");
+            break;
+        }
+
         case 'v':
         case 'V': {
             FILE *fbout = fopen("/tmp/.goto_path", "w");
             if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
 
-const char *filetree_cmd = "lsx -R | fzf --ansi --reverse --bind 'ctrl-r:reload(lsx -R)'";
+            const char *filetree_cmd = "lsx -R | fzf --ansi --reverse --bind 'ctrl-r:reload(lsx -R)'";
 
             open_selected_with_tmux_tree(list, filetree_cmd, "vic", "vic");
             break;
         }
 
-case 'p':
-case 'P': {
-    FILE *fbout = fopen("/tmp/.goto_path", "w");
-    if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
-    open_with_right_split(list, "PAGER", "less -R");
+        case 'p':
+        case 'P': {
+            FILE *fbout = fopen("/tmp/.goto_path", "w");
+            if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
+            open_with_right_split(list, "PAGER", "less -R");
+            break;
+        }
 
-    break;
-}
         case 'h':
-        case 'H':
             list->show_hidden = !list->show_hidden;
             load_directory(list, list->cwd);
+            break;
+            
+        case 'H':
+            cmd_show_help();
             break;
 
         case 's':
@@ -1320,7 +1564,7 @@ case 'P': {
                 FileItem *item = &list->items[list->selected];
 
                 if (strcmp(item->name, ".") == 0 || strcmp(item->name, "..") == 0) {
-                    popup_message("Nope", "Refusing to delete '.' or '..'.");
+                    popup_message("Nope", "Refusing to delete '.' or '.''.");
                     break;
                 }
 
@@ -1351,7 +1595,8 @@ case 'P': {
 
             if (ok > 0) {
                 char full[MAX_PATH];
-                snprintf(full, sizeof(full), "%s/%s", list->cwd, rel);
+                int ret = snprintf(full, sizeof(full), "%s/%s", list->cwd, rel);
+                if (ret < 0 || ret >= (int)sizeof(full)) break;
 
                 struct stat st;
                 if (lstat(full, &st) == 0) {
@@ -1441,6 +1686,7 @@ case 'P': {
             break;
     }
 }
+
 static void expand_tilde(char *out, size_t out_len, const char *in) {
     if (!out || out_len == 0 || !in) return;
 
@@ -1453,8 +1699,12 @@ static void expand_tilde(char *out, size_t out_len, const char *in) {
         snprintf(out, out_len, "%s", in);
     }
 }
+
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
+    
+    // Register signal handlers early
+    register_signal_handlers();
 
     FileList list = (FileList){0};
     char start[MAX_PATH];
@@ -1478,13 +1728,11 @@ int main(int argc, char **argv) {
         char tmp[MAX_PATH];
         expand_tilde(tmp, sizeof(tmp), env_start);
 
-        // let load_directory resolve; but we can attempt realpath for niceness
         char resolved[MAX_PATH];
         if (realpath(tmp, resolved)) {
             strncpy(start, resolved, sizeof(start) - 1);
             start[sizeof(start) - 1] = '\0';
         } else {
-            // fallback: use tmp as-is (relative allowed)
             strncpy(start, tmp, sizeof(start) - 1);
             start[sizeof(start) - 1] = '\0';
         }
@@ -1495,7 +1743,6 @@ int main(int argc, char **argv) {
         char tmp[MAX_PATH];
         expand_tilde(tmp, sizeof(tmp), argv[1]);
 
-        // same deal: resolve if possible, otherwise use as-is
         char resolved[MAX_PATH];
         if (realpath(tmp, resolved)) {
             strncpy(start, resolved, sizeof(start) - 1);
@@ -1539,5 +1786,13 @@ int main(int argc, char **argv) {
     }
 
     endwin();
+    
+    // Cleanup temp files on normal exit
+    for (int i = 0; i < g_temp_file_count; i++) {
+        if (g_temp_files[i][0] != '\0') {
+            unlink(g_temp_files[i]);
+        }
+    }
+    
     return 0;
 }
