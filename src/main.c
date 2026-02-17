@@ -139,14 +139,14 @@ static int g_temp_file_count = 0;
 static void cleanup_handler(int sig) {
     (void)sig;
     endwin();
-    
+
     // Clean up temp files
     for (int i = 0; i < g_temp_file_count; i++) {
         if (g_temp_files[i][0] != '\0') {
             unlink(g_temp_files[i]);
         }
     }
-    
+
     exit(0);
 }
 
@@ -177,7 +177,7 @@ static void popup_message(const char *title, const char *message) {
 
     WINDOW *win = newwin(h, w, y, x);
     if (!win) return;
-    
+
     keypad(win, TRUE);
     box(win, 0, 0);
 
@@ -206,7 +206,7 @@ static int popup_confirm(const char *title, const char *message) {
 
     WINDOW *win = newwin(h, w, y, x);
     if (!win) return 0;
-    
+
     keypad(win, TRUE);
     box(win, 0, 0);
 
@@ -242,7 +242,7 @@ static int popup_prompt(char *out, size_t out_len, const char *title, const char
 
     WINDOW *win = newwin(h, w, y, x);
     if (!win) return 0;
-    
+
     keypad(win, TRUE);
     box(win, 0, 0);
 
@@ -282,18 +282,18 @@ static int popup_prompt(char *out, size_t out_len, const char *title, const char
 
 static int command_exists(const char *cmd) {
     if (!cmd || !*cmd) return 0;
-    
+
     // Validate command name (no shell metacharacters)
     for (const char *p = cmd; *p; p++) {
         if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') {
             return 0;
         }
     }
-    
+
     char buf[512];
     int ret = snprintf(buf, sizeof(buf), "command -v %s >/dev/null 2>&1", cmd);
     if (ret < 0 || ret >= (int)sizeof(buf)) return 0;
-    
+
     return system(buf) == 0;
 }
 
@@ -347,7 +347,7 @@ static int create_new_file(const char *cwd, const char *name) {
     // Use O_EXCL to atomically fail if file exists (prevents TOCTOU)
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) return -1;
-    
+
     close(fd);
     return 0;
 }
@@ -377,7 +377,7 @@ static int delete_item_shallow(const FileItem *item) {
 
 static int rename_item(const FileItem *item, const char *new_name) {
     // Validate new name
-    if (!new_name || !*new_name || strchr(new_name, '/') || 
+    if (!new_name || !*new_name || strchr(new_name, '/') ||
         strcmp(new_name, ".") == 0 || strcmp(new_name, "..") == 0) {
         errno = EINVAL;
         return -1;
@@ -569,7 +569,7 @@ static int ff_grep_selected_file(FileList *list, int *out_line) {
         "\"",
         qcwd, qfile, qout
     );
-    
+
     if (ret < 0 || ret >= (int)sizeof(cmd)) {
         unlink(tmp_out);
         return -1;
@@ -857,7 +857,7 @@ static int fuzzy_select_path(FileList *list, char *out, size_t out_len) {
                  "%s --prompt='Search> ' --height=40%% --reverse",
                  qcwd, fz);
     }
-    
+
     if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
 
     FILE *p = popen(cmd, "r");
@@ -933,14 +933,14 @@ static void shell_quote_single(char *out, size_t out_len, const char *in) {
     }
 
     size_t j = 0;
-    
+
     // Check space for opening quote
     if (j + 1 >= out_len) {
         out[0] = '\0';
         return;
     }
     out[j++] = '\'';
-    
+
     for (size_t i = 0; in[i] != '\0'; i++) {
         if (in[i] == '\'') {
             // Need 5 chars for '"'"' plus null terminator
@@ -961,7 +961,7 @@ static void shell_quote_single(char *out, size_t out_len, const char *in) {
             out[j++] = in[i];
         }
     }
-    
+
     // Add closing quote
     if (j + 2 >= out_len) {
         out[0] = '\0';
@@ -973,7 +973,7 @@ static void shell_quote_single(char *out, size_t out_len, const char *in) {
 
 static int run_viewer_command(const char *cmd) {
     if (!cmd || !*cmd) return -1;
-    
+
     endwin();
     int rc = system(cmd);
     refresh();
@@ -1010,14 +1010,14 @@ static int tmux_split_left_detached(const char *cwd, const char *filetree_cmd) {
     char qscript[QUOTE_BUF_SIZE * 2];
     shell_quote_single(qcwd, sizeof(qcwd), cwd);
     shell_quote_single(qscript, sizeof(qscript), filetree_cmd);
-    
+
     if (qcwd[0] == '\0' || qscript[0] == '\0') return -1;
 
     char cmd[8192];
     int ret = snprintf(cmd, sizeof(cmd),
-             "tmux split-window -d -h -b -p 25 -c %s sh -lc %s",
+             "tmux split-window -d -h -b -p 10 -c %s sh -lc %s",
              qcwd, qscript);
-    
+
     if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
 
     return system(cmd);
@@ -1026,7 +1026,7 @@ static int tmux_split_left_detached(const char *cwd, const char *filetree_cmd) {
 static void tmux_stop_left_of_pane(const char *editor_pane_id, int remove_pane) {
     char qid[256];
     shell_quote_single(qid, sizeof(qid), editor_pane_id);
-    
+
     if (qid[0] == '\0') return;
 
     char cmd[2048];
@@ -1044,7 +1044,7 @@ static void tmux_stop_left_of_pane(const char *editor_pane_id, int remove_pane) 
                  "send-keys -t '{left-of}' C-c",
                  qid);
     }
-    
+
     if (ret < 0 || ret >= (int)sizeof(cmd)) return;
 
     system(cmd);
@@ -1062,15 +1062,15 @@ static int tmux_toggle_terminal(const char *cwd) {
         char check_cmd[512];
         char qid[256];
         shell_quote_single(qid, sizeof(qid), g_terminal_pane_id);
-        
+
         if (qid[0] == '\0') {
             g_terminal_pane_id[0] = '\0';
             return -1;
         }
-        
+
         int ret = snprintf(check_cmd, sizeof(check_cmd),
                  "tmux display-message -p -t %s '#{pane_id}' 2>/dev/null", qid);
-        
+
         if (ret < 0 || ret >= (int)sizeof(check_cmd)) {
             g_terminal_pane_id[0] = '\0';
             return -1;
@@ -1100,13 +1100,13 @@ static int tmux_toggle_terminal(const char *cwd) {
     // Create new terminal pane at bottom
     char qcwd[QUOTE_BUF_SIZE];
     shell_quote_single(qcwd, sizeof(qcwd), cwd);
-    
+
     if (qcwd[0] == '\0') return -1;
 
     char cmd[8192];
     int ret = snprintf(cmd, sizeof(cmd),
              "tmux split-window -v -p 30 -c %s", qcwd);
-    
+
     if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
 
     if (system(cmd) != 0) {
@@ -1135,10 +1135,10 @@ static int tmux_toggle_terminal(const char *cwd) {
 // Validate editor command to prevent shell injection
 static int validate_editor(const char *editor) {
     if (!editor || !*editor) return 0;
-    
+
     // Allow alphanumeric, dash, underscore, slash, and dot
     for (const char *p = editor; *p; p++) {
-        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_' && *p != '/' && *p != '.') {
+        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_' && *p != '/' && *p != '.' && *p != ' ') {
             return 0;
         }
     }
@@ -1163,7 +1163,7 @@ static int open_selected_with_tmux_tree(FileList *list,
 
     const char *editor = getenv(editor_env);
     if (!editor || !*editor) editor = editor_fallback;
-    
+
     // Validate editor
     if (!validate_editor(editor)) {
         popup_message("Error", "Invalid editor command");
@@ -1172,7 +1172,7 @@ static int open_selected_with_tmux_tree(FileList *list,
 
     char qpath[QUOTE_BUF_SIZE];
     shell_quote_single(qpath, sizeof(qpath), item->full_path);
-    
+
     if (qpath[0] == '\0') return -1;
 
     if (!in_tmux()) {
@@ -1205,7 +1205,7 @@ static int open_selected_with_tmux_tree(FileList *list,
         clear();
         return -1;
     }
-    
+
     int rc = system(editcmd);
 
     tmux_stop_left_of_pane(editor_pane_id, 1);
@@ -1231,7 +1231,7 @@ static int open_selected_with(FileList *list, const char *envvar, const char *fa
 
     const char *tool = getenv(envvar);
     if (!tool || !*tool) tool = fallback_cmd;
-    
+
     // Validate tool
     if (!validate_editor(tool)) {
         popup_message("Error", "Invalid tool command");
@@ -1240,7 +1240,7 @@ static int open_selected_with(FileList *list, const char *envvar, const char *fa
 
     char qpath[QUOTE_BUF_SIZE];
     shell_quote_single(qpath, sizeof(qpath), item->full_path);
-    
+
     if (qpath[0] == '\0') return -1;
 
     char cmd[8192];
@@ -1277,7 +1277,7 @@ static int open_with_right_split(FileList *list, const char *envvar, const char 
 
     const char *tool = getenv(envvar);
     if (!tool || !*tool) tool = fallback_cmd;
-    
+
     // Validate tool
     if (!validate_editor(tool)) {
         popup_message("Error", "Invalid tool command");
@@ -1288,17 +1288,23 @@ static int open_with_right_split(FileList *list, const char *envvar, const char 
     char qcwd[QUOTE_BUF_SIZE];
     shell_quote_single(qpath, sizeof(qpath), item->full_path);
     shell_quote_single(qcwd, sizeof(qcwd), list->cwd);
-    
+
     if (qpath[0] == '\0' || qcwd[0] == '\0') return -1;
 
-    // Create split on the right at 80% width and run tool in a shell wrapper
+char inner[8192];
+    int r = snprintf(inner, sizeof(inner), "%s %s; tmux kill-pane", tool, qpath);
+    if (r < 0 || r >= (int)sizeof(inner)) return -1;
+
+    char qinner[QUOTE_BUF_SIZE * 2];
+    shell_quote_single(qinner, sizeof(qinner), inner);
+    if (qinner[0] == '\0') return -1;
+
     char cmd[8192];
     int ret = snprintf(cmd, sizeof(cmd),
-             "tmux split-window -h -p 80 -c %s 'sh -lc \"%s %s; tmux kill-pane\"'",
-             qcwd, tool, qpath);
-    
+             "tmux split-window -h -p 90 -c %s sh -lc %s",
+             qcwd, qinner);
     if (ret < 0 || ret >= (int)sizeof(cmd)) return -1;
-    
+
     endwin();
     system(cmd);
     refresh();
@@ -1306,14 +1312,13 @@ static int open_with_right_split(FileList *list, const char *envvar, const char 
 
     return 0;
 }
-
 static void cmd_show_help(void) {
     const char *fz = pick_fuzzy_tool();
     if (!fz) {
         popup_message("No fuzzy finder", "Install ff or fzf for the help menu.");
         return;
     }
-    
+
     char help_template[] = "/tmp/goto_help_XXXXXX";
     int fd = mkstemp(help_template);
     if (fd < 0) {
@@ -1389,7 +1394,7 @@ static void cmd_show_help(void) {
         "--header='GoTo Help - Search commands (ESC to close)' "
         "< \"%s\" > /dev/null 2> /dev/tty",
         help_template);
-    
+
     if (ret < 0 || ret >= (int)sizeof(cmd)) {
         unlink(help_template);
         return;
@@ -1430,7 +1435,7 @@ void handle_input(FileList *list, int *running) {
             if (ok > 0) {
                 const char *editor = getenv("EDITOR");
                 if (!editor || !*editor) editor = "vi";
-                
+
                 if (!validate_editor(editor)) {
                     popup_message("Error", "Invalid EDITOR environment variable");
                     break;
@@ -1440,7 +1445,7 @@ void handle_input(FileList *list, int *running) {
 
                 char qpath[QUOTE_BUF_SIZE];
                 shell_quote_single(qpath, sizeof(qpath), it->full_path);
-                
+
                 if (qpath[0] == '\0') break;
 
                 char ecmd[8192];
@@ -1493,7 +1498,7 @@ void handle_input(FileList *list, int *running) {
             list->show_hidden = !list->show_hidden;
             load_directory(list, list->cwd);
             break;
-            
+
         case 'H':
             cmd_show_help();
             break;
@@ -1702,7 +1707,7 @@ static void expand_tilde(char *out, size_t out_len, const char *in) {
 
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
-    
+
     // Register signal handlers early
     register_signal_handlers();
 
@@ -1786,13 +1791,13 @@ int main(int argc, char **argv) {
     }
 
     endwin();
-    
+
     // Cleanup temp files on normal exit
     for (int i = 0; i < g_temp_file_count; i++) {
         if (g_temp_files[i][0] != '\0') {
             unlink(g_temp_files[i]);
         }
     }
-    
+
     return 0;
 }
