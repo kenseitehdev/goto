@@ -133,7 +133,14 @@ typedef struct {
 static char g_terminal_pane_id[128] = {0};
 static char g_temp_files[10][PATH_MAX] = {{0}};
 static int g_temp_file_count = 0;
-
+static void write_goto_path(const char *cwd) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/tmp/.goto_path.%d", (int)getpid());
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return;
+    write(fd, cwd, strlen(cwd));
+    close(fd);
+}
 static void cleanup_handler(int sig) {
     (void)sig;
     endwin();
@@ -300,10 +307,15 @@ static int create_new_dir(const char *cwd, const char *name) {
 }
 
 static int delete_item_shallow(const FileItem *item) {
-    if (item->is_dir) return rmdir(item->full_path);
+    if (item->is_dir) {
+        if (rmdir(item->full_path) != 0) {
+            if (errno == EEXIST) errno = ENOTEMPTY;
+            return -1;
+        }
+        return 0;
+    }
     return unlink(item->full_path);
 }
-
 static int rename_item(const FileItem *item, const char *new_name) {
     if (!new_name || !*new_name || strchr(new_name, '/') ||
         strcmp(new_name, ".") == 0 || strcmp(new_name, "..") == 0) {
@@ -418,12 +430,15 @@ static int compare_items_static(const void *a, const void *b) {
     return compare_items(a, b, g_sort_ctx);
 }
 static void sort_items_portable(FileList *list) {
+    sigset_t block, old;
+    sigfillset(&block);
+    sigprocmask(SIG_BLOCK, &block, &old);
     g_sort_ctx = list;
     qsort(list->items, list->count, sizeof(FileItem), compare_items_static);
     g_sort_ctx = NULL;
+    sigprocmask(SIG_SETMASK, &old, NULL);
 }
 #endif
-
 static int ff_grep_selected_file(FileList *list, int *out_line) {
     if (!list || !out_line) return -1;
     *out_line = 0;
@@ -936,9 +951,9 @@ static int open_with_right_split(FileList *list, const char *envvar, const char 
     shell_quote_single(qpath, sizeof(qpath), item->full_path);
     shell_quote_single(qcwd,  sizeof(qcwd),  list->cwd);
     if (qpath[0] == '\0' || qcwd[0] == '\0') return -1;
-    char inner[8192];
-    int r = snprintf(inner, sizeof(inner), "%s %s; tmux kill-pane", tool, qpath);
-    if (r < 0 || r >= (int)sizeof(inner)) return -1;
+char inner[8192];
+int r = snprintf(inner, sizeof(inner), "%s %s; tmux kill-pane", tool, item->full_path);    
+if (r < 0 || r >= (int)sizeof(inner)) return -1;
     char qinner[QUOTE_BUF_SIZE * 2];
     shell_quote_single(qinner, sizeof(qinner), inner);
     if (qinner[0] == '\0') return -1;
@@ -1109,25 +1124,22 @@ void handle_input(FileList *list, int *running) {
 
         case 'e':
         case 'E': {
-            FILE *ftout = fopen("/tmp/.goto_path", "w");
-            if (ftout) { fprintf(ftout, "%s", list->cwd); fclose(ftout); }
+            write_goto_path(list->cwd);
             open_with_right_split(list, "EDITOR", "vi");
             break;
         }
 
         case 'v':
         case 'V': {
-            FILE *fbout = fopen("/tmp/.goto_path", "w");
-            if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
-            const char *filetree_cmd = "lsx -R | fzf --ansi --reverse --bind 'ctrl-r:reload(lsx -R)'";
+            write_goto_path(list->cwd);
+            const char *filetree_cmd = "lsx -R | fff --ansi --reverse --bind 'ctrl-r:reload(lsx -R)'";
             open_selected_with_tmux_tree(list, filetree_cmd, "vic", "vic");
             break;
         }
 
         case 'p':
         case 'P': {
-            FILE *fbout = fopen("/tmp/.goto_path", "w");
-            if (fbout) { fprintf(fbout, "%s", list->cwd); fclose(fbout); }
+            write_goto_path(list->cwd);
             open_with_right_split(list, "PAGER", "less -R");
             break;
         }
@@ -1197,42 +1209,31 @@ void handle_input(FileList *list, int *running) {
             break;
         }
 
-        case 'd':
-        case 'D': {
-            if (list->selected < list->count) {
-                FileItem *item = &list->items[list->selected];
-                if (strcmp(item->name, ".") == 0 || strcmp(item->name, "..") == 0) {
-                    popup_message("Nope", "Refusing to delete '.' or '..'."); break;
-                }
-                char prompt[512];
-                snprintf(prompt, sizeof(prompt), "Delete '%s'? This cannot be undone.", item->name);
-                if (popup_confirm("Confirm Delete", prompt)) {
-                    if (delete_item_shallow(item) != 0) {
-                        char msg[256];
-                        snprintf(msg, sizeof(msg), "Delete failed: %s", strerror(errno));
-                        popup_message("Error", msg);
-                    }
-                    load_directory(list, list->cwd);
-                    if (list->count == 0) list->selected = 0;
-                    else if (list->selected >= list->count) list->selected = list->count - 1;
-                }
-            }
-            break;
+case 'd':
+case 'D': {
+    if (list->selected < list->count) {
+        FileItem *item = &list->items[list->selected];
+        if (strcmp(item->name, ".") == 0 || strcmp(item->name, "..") == 0) {
+            popup_message("Nope", "Refusing to delete '.' or '..'."); break;
         }
-
-        // -------------------------------------------------------------------
-        // BUG 2 FIX: '/' fuzzy search — files in subdirectories
-        //
-        // fuzzy_select_path() returns a relative path like "subdir/file.c".
-        // The old code compared that full string against item->name (= "file.c"),
-        // so the cursor never moved for files that weren't in the current dir.
-        //
-        // Fix: split `rel` on its last '/'.
-        //   • If there's a directory component, navigate into that subdirectory
-        //     first (load_directory), then match only the basename.
-        //   • If there's no '/', the file is already in the current directory;
-        //     match as before against item->name.
-        // -------------------------------------------------------------------
+        char prompt[512];
+        snprintf(prompt, sizeof(prompt), "Delete '%s'? This cannot be undone.", item->name);
+        if (popup_confirm("Confirm Delete", prompt)) {
+            if (delete_item_shallow(item) != 0) {
+                char msg[256];
+                if (errno == ENOTEMPTY)
+                    snprintf(msg, sizeof(msg), "Directory is not empty");
+                else
+                    snprintf(msg, sizeof(msg), "Delete failed: %s", strerror(errno));
+                popup_message("Error", msg);
+            }
+            load_directory(list, list->cwd);
+            if (list->count == 0) list->selected = 0;
+            else if (list->selected >= list->count) list->selected = list->count - 1;
+        }
+    }
+    break;
+}
         case '/': {
             char rel[MAX_PATH];
 
@@ -1303,8 +1304,7 @@ void handle_input(FileList *list, int *running) {
 
         case 'o':
         case 'O': {
-            FILE *fout = fopen("/tmp/.goto_path", "w");
-            if (fout) { fprintf(fout, "%s", list->cwd); fclose(fout); }
+            write_goto_path(list->cwd);
             *running = 0;
             break;
         }
